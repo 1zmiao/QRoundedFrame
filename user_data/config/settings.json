@@ -1,0 +1,86 @@
+{
+  "theme": {
+    "darkPrimaryColor": "#5254AC",
+    "primaryColor": "#5254AC",
+    "mode": "dark"
+  },
+  "ui": {
+    "fontScale": 1.05,
+    "showColorButton": true
+  },
+  "window": {
+    "closeToTray": true,
+    "minimizeToTray": true
+  },
+  "storageModes": {
+    "demo": {
+      "input": "encrypted",
+      "token": "encrypted",
+      "performanceInput": "encrypted"
+    },
+    "tray": {
+      "iconPath": "plain"
+    }
+  },
+  "demo": {
+    "switch": false
+  },
+  "windows": {
+    "main": {
+      "normalGeometry": {
+        "x": 259,
+        "y": 224,
+        "w": 1023,
+        "h": 590
+      }
+    },
+    "child-about-1": {
+      "normalGeometry": {
+        "x": 283,
+        "y": 312,
+        "w": 760,
+        "h": 520
+      },
+      "visibility": "normal"
+    },
+    "child-about-2": {
+      "visibility": "maximized",
+      "normalGeometry": {
+        "x": -50,
+        "y": 150,
+        "w": 1536,
+        "h": 920
+      }
+    },
+    "child-about-3": {
+      "visibility": "normal",
+      "normalGeometry": {
+        "x": 344,
+        "y": 192,
+        "w": 760,
+        "h": 520
+      }
+    },
+    "child-update-2": {
+      "visibility": "normal",
+      "normalGeometry": {
+        "x": 323,
+        "y": 219,
+        "w": 716,
+        "h": 462
+      }
+    }
+  },
+  "paths": {
+    "defaultProject": ""
+  },
+  "tray": {
+    "iconPath": "12"
+  },
+  "settings": {
+    "featureB": false
+  },
+  "layout": {
+    "navWidth": 111.0
+  }
+}

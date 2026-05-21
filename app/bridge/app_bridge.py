@@ -22,7 +22,11 @@ class AppBridge(QObject):
         self._theme = ThemeController(self._settings)
         self._window = WindowController(self._settings)
         self._dialogs = DialogService(engine=engine, qml_dir=qml_dir)
-        self._tray = TrayController(app=app, settings=self._settings, theme=self._theme, project_root=qml_dir.parent, parent=self)
+        self._tray = TrayController(app=app, settings=self._settings, theme=self._theme, project_root=qml_dir.parent, parent=self, engine=engine, qml_dir=qml_dir)
+        try:
+            app.aboutToQuit.connect(self.shutdown)
+        except Exception:
+            pass
 
     @Property(QObject, constant=True)
     def settings(self):
@@ -48,6 +52,17 @@ class AppBridge(QObject):
     def tray(self):
         return self._tray
 
+    @Slot()
+    def shutdown(self) -> None:
+        try:
+            self._window.shutdown()
+        except Exception:
+            pass
+        try:
+            self._tray.shutdown()
+        except Exception:
+            pass
+
     @Slot(str)
     def copyToClipboard(self, text: str) -> None:
         clipboard = self._app.clipboard()
@@ -57,4 +72,3 @@ class AppBridge(QObject):
         clipboard = self._app.clipboard()
         if clipboard is not None:
             clipboard.setText(str(text))
-

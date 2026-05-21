@@ -74,7 +74,7 @@ Item {
                     Row {
                         width: parent.width
                         spacing: Core.Theme.dp(8)
-                        Text { text: "界面字体大小"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.fontSize.body; width: Core.Theme.dp(120); anchors.verticalCenter: parent.verticalCenter }
+                        Text { text: "界面字体大小（ctrl+滚轮）"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.fontSize.body; width: Core.Theme.dp(168); anchors.verticalCenter: parent.verticalCenter }
                         Text { text: Math.round(13 * Core.Theme.fontScale) + " px / " + Math.round(Core.Theme.fontScale * 100) + "%"; color: Core.Theme.color.mutedText; font.pixelSize: Core.Theme.fontSize.control; width: Core.Theme.dp(94); anchors.verticalCenter: parent.verticalCenter }
                         AppButton { text: "重置"; variant: "soft"; minWidth: Core.Theme.dp(56); horizontalPadding: Core.Theme.dp(12); onClicked: if (root.appReady && App.theme) App.theme.resetFontScale() }
                     }
@@ -132,6 +132,12 @@ Item {
                             color: Core.Theme.primary
                             border.color: Core.Theme.color.card
                             border.width: 2
+                        }
+                    }
+                    Connections {
+                        target: root.appReady && App.theme ? App.theme : null
+                        function onFontScaleChanged(scale) {
+                            fontSlider.value = Math.round(scale * 100 / fontSlider.stepSize) * fontSlider.stepSize
                         }
                     }
                     Row {

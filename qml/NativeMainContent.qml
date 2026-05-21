@@ -36,6 +36,27 @@ Item {
         NativeHost.changeThemeWithRipple(nextMode, cx, cy)
     }
 
+    function syncNativeHitTestMetrics() {
+        if (typeof NativeHost === "undefined" || !NativeHost || !NativeHost.setTitleBarHitTestMetrics)
+            return
+        NativeHost.setTitleBarHitTestMetrics(
+            Math.round(titleBar.nativeTitleBarHeight),
+            Math.round(titleBar.nativeCaptionLeftA),
+            Math.round(titleBar.nativeCaptionRightA),
+            Math.round(titleBar.nativeCaptionLeftB),
+            Math.round(titleBar.nativeCaptionRightB)
+        )
+    }
+
+    function adjustFontScaleByWheel(deltaY) {
+        if (typeof App === "undefined" || !App || !App.theme)
+            return
+        if (deltaY > 0)
+            App.theme.increaseFontScale()
+        else if (deltaY < 0)
+            App.theme.decreaseFontScale()
+    }
+
     Rectangle {
         id: background
         anchors.fill: parent
@@ -46,6 +67,15 @@ Item {
         border.width: root.nativeMaximized ? 0 : 1
         Behavior on color { ColorAnimation { duration: 150; easing.type: Easing.OutCubic } }
         Behavior on radius { NumberAnimation { duration: 80; easing.type: Easing.OutCubic } }
+    }
+
+    WheelHandler {
+        acceptedModifiers: Qt.ControlModifier
+        target: null
+        onWheel: function(event) {
+            root.adjustFontScaleByWheel(event.angleDelta.y)
+            event.accepted = true
+        }
     }
 
     Item {
@@ -75,6 +105,7 @@ Item {
                 showNavToggle: true
                 showColorButton: Core.Theme.showColorButton
                 windowMaximized: root.nativeMaximized
+                useNativeCaption: Qt.platform.os === "windows"
                 leftMenus: [
                     { "text": "设置", "action": "settings" },
                     { "text": "工具", "action": "tools" },
@@ -92,6 +123,11 @@ Item {
                 onThemeToggleRequested: function(localPos, nextMode) { root.changeThemeWithRipple(nextMode, localPos.x, localPos.y) }
                 onAlwaysOnTopRequested: function(enabled) { NativeHost.setAlwaysOnTop(enabled) }
                 onToggleNavRequested: sideNav.toggle()
+                onNativeTitleBarHeightChanged: Qt.callLater(root.syncNativeHitTestMetrics)
+                onNativeCaptionLeftAChanged: Qt.callLater(root.syncNativeHitTestMetrics)
+                onNativeCaptionRightAChanged: Qt.callLater(root.syncNativeHitTestMetrics)
+                onNativeCaptionLeftBChanged: Qt.callLater(root.syncNativeHitTestMetrics)
+                onNativeCaptionRightBChanged: Qt.callLater(root.syncNativeHitTestMetrics)
                 onMenuActionRequested: function(action, kind) {
                     if (kind === "page") {
                         sideNav.restore()
@@ -142,23 +178,30 @@ Item {
             }
         }
 
-        TrayMenuWindow { id: trayMenu }
-        MouseArea {
-            anchors.fill: parent
-            z: 999999
-            visible: trayMenu.visible
-            enabled: visible
-            acceptedButtons: Qt.LeftButton | Qt.RightButton
-            onPressed: function(mouse) { trayMenu.closeMenu(); mouse.accepted = true }
-        }
+    }
+
+    SnapPreviewWindow {
+        id: snapPreview
+        transientParent: root.Window.window
     }
 
     Binding { target: titleBar; property: "navHidden"; value: sideNav.width === 0 }
+
+    onWidthChanged: Qt.callLater(root.syncNativeHitTestMetrics)
 
     Connections {
         target: NativeHost
         function onToastRequested(message) { root.showToast(message) }
         function onMaximizedChanged() { root.nativeMaximized = NativeHost.isMaximizedState() }
+        function onCaptionPressed() { titleBar.closeMenus() }
+        function onSnapPreviewChanged(key, x, y, w, h, visible) {
+            if (key !== root.windowKey)
+                return
+            if (visible)
+                snapPreview.showAt(Qt.rect(x, y, w, h))
+            else
+                snapPreview.hidePreview()
+        }
     }
 
     Connections {
@@ -174,11 +217,8 @@ Item {
 
     Connections {
         target: (typeof App !== "undefined" && App && App.tray) ? App.tray : null
-        function onTrayContextMenuRequested(x, y) { trayMenu.toggleAt(x, y) }
         function onTrayPrimaryClicked() {
-            if (trayMenu.visible)
-                trayMenu.closeMenu()
-            else if (App && App.tray)
+            if (App && App.tray)
                 App.tray.centerMainWindow()
         }
     }
@@ -187,5 +227,6 @@ Item {
         root.nativeMaximized = NativeHost.isMaximizedState()
         if (App && App.tray)
             App.tray.registerWindow(NativeHost)
+        Qt.callLater(root.syncNativeHitTestMetrics)
     }
 }

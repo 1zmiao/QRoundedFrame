@@ -16,14 +16,12 @@ if sys.platform == "win32":
     dwmapi = ctypes.windll.dwmapi
 
     WM_NCHITTEST = 0x0084
-    WM_NCLBUTTONDOWN = 0x00A1
-    WM_NCLBUTTONDBLCLK = 0x00A3
-    WM_GETMINMAXINFO = 0x0024
     WM_NCCALCSIZE = 0x0083
-    WM_SIZE = 0x0005
+    WM_NCLBUTTONDOWN = 0x00A1
     WM_SYSCOMMAND = 0x0112
     SC_MOVE = 0xF010
-    HTCLIENT = 1
+    SC_MAXIMIZE = 0xF030
+    SC_RESTORE = 0xF120
     HTCAPTION = 2
     HTLEFT = 10
     HTRIGHT = 11
@@ -33,20 +31,20 @@ if sys.platform == "win32":
     HTBOTTOM = 15
     HTBOTTOMLEFT = 16
     HTBOTTOMRIGHT = 17
-    SW_MAXIMIZE = 3
     SWP_NOSIZE = 0x0001
     SWP_NOMOVE = 0x0002
     SWP_NOZORDER = 0x0004
     SWP_NOACTIVATE = 0x0010
-    SWP_NOOWNERZORDER = 0x0200
     SWP_FRAMECHANGED = 0x0020
+    SWP_NOOWNERZORDER = 0x0200
     DWMWA_WINDOW_CORNER_PREFERENCE = 33
     DWMWA_BORDER_COLOR = 34
     DWMWCP_ROUND = 2
     DWMWA_COLOR_NONE = 0xFFFFFFFE
     GWL_STYLE = -16
-    WS_CAPTION = 0x00C00000
     WS_THICKFRAME = 0x00040000
+    WS_CAPTION = 0x00C00000
+    WS_SYSMENU = 0x00080000
     WS_MINIMIZEBOX = 0x00020000
     WS_MAXIMIZEBOX = 0x00010000
 
@@ -89,6 +87,8 @@ class NativeFramelessHost(QWidget):
     geometryChanged = Signal()
     alwaysOnTopChanged = Signal(bool)
     toastRequested = Signal(str)
+    snapPreviewChanged = Signal(str, int, int, int, int, bool)
+    captionPressed = Signal()
 
     def __init__(self, app: QApplication, engine, bridge, qml_dir: Path, parent=None):
         super().__init__(parent)
@@ -100,6 +100,10 @@ class NativeFramelessHost(QWidget):
         self._normal_geometry = QRect(160, 90, 1080, 700)
         self._normal_frame_geometry = QRect(self._normal_geometry)
         self._move_state: dict | None = None
+        self._title_bar_height = 36
+        self._caption_regions: list[tuple[int, int]] = []
+        self._snap_preview_rect: QRect | None = None
+        self._snap_preview_type: str | None = None
         self._snap_margin = 14
         self._always_on_top = False
         self._title = "QML 无边框框架"
@@ -126,13 +130,17 @@ class NativeFramelessHost(QWidget):
         self._move_timer = QTimer(self)
         self._move_timer.setInterval(12)
         self._move_timer.timeout.connect(self._tick_system_move)
+        try:
+            self._app.aboutToQuit.connect(self.shutdown)
+        except Exception:
+            pass
 
         self._restore_geometry_from_settings()
         self._quick.setSource(QUrl.fromLocalFile(str(self._qml_dir / "NativeMainContent.qml")))
 
     @Property(bool, notify=maximizedChanged)
     def maximized(self) -> bool:
-        return bool(self.isMaximized() or self.isFullScreen())
+        return bool(self._is_maximized_state() or self.isFullScreen())
 
     @Property(bool, notify=activeChanged)
     def active(self) -> bool:
@@ -161,7 +169,14 @@ class NativeFramelessHost(QWidget):
 
     @Slot(result=bool)
     def isMaximizedState(self) -> bool:
-        return bool(self.isMaximized() or self.isFullScreen())
+        return bool(self._is_maximized_state() or self.isFullScreen())
+
+    @Slot()
+    def shutdown(self) -> None:
+        self._move_state = None
+        self._hide_snap_preview()
+        if self._move_timer.isActive():
+            self._move_timer.stop()
 
     @Slot()
     @Slot(float, float)
@@ -169,6 +184,9 @@ class NativeFramelessHost(QWidget):
         if sys.platform != "win32":
             return
         try:
+            self._hide_snap_preview()
+            if self._begin_native_caption_move(float(local_x), float(local_y)):
+                return
             if self.isMaximized() or self.isFullScreen() or self._is_snap_geometry():
                 self._begin_manual_restore_move(float(local_x), float(local_y))
                 return
@@ -184,8 +202,27 @@ class NativeFramelessHost(QWidget):
         except Exception:
             pass
 
+    @Slot(float, float, float, float, float)
+    def setTitleBarHitTestMetrics(self, height: float, left_a: float, right_a: float, left_b: float, right_b: float) -> None:
+        regions: list[tuple[int, int]] = []
+        for left, right in ((left_a, right_a), (left_b, right_b)):
+            try:
+                lval = max(0, int(round(float(left))))
+                rval = max(0, int(round(float(right))))
+            except Exception:
+                continue
+            if rval > lval + 2:
+                regions.append((lval, rval))
+        try:
+            self._title_bar_height = max(24, min(80, int(round(float(height)))))
+        except Exception:
+            self._title_bar_height = 36
+        self._caption_regions = regions
+
     @Slot()
     def updateSystemMove(self) -> None:
+        if self._move_state and bool(self._move_state.get("system_move", False)):
+            return
         self._apply_system_move()
 
     def _apply_system_move(self) -> None:
@@ -198,11 +235,11 @@ class NativeFramelessHost(QWidget):
         new_x = int(cursor.x() - float(state["local_x"]))
         new_y = int(cursor.y() - float(state["local_y"]))
         current = self.geometry()
-        if new_x == current.x() and new_y == current.y():
-            return
-        self.setGeometry(new_x, new_y, width, height)
-        self._normal_geometry = QRect(new_x, new_y, width, height)
-        self.geometryChanged.emit()
+        if new_x != current.x() or new_y != current.y():
+            self.setGeometry(new_x, new_y, width, height)
+            self._normal_geometry = QRect(new_x, new_y, width, height)
+            self.geometryChanged.emit()
+        self._update_snap_preview()
 
     def _ensure_move_timer(self) -> None:
         if not self._move_timer.isActive():
@@ -211,6 +248,10 @@ class NativeFramelessHost(QWidget):
     def _tick_system_move(self) -> None:
         if not self._move_state:
             self._move_timer.stop()
+            return
+        if bool(self._move_state.get("system_move", False)):
+            if not bool(QGuiApplication.mouseButtons() & Qt.MouseButton.LeftButton):
+                self._finish_native_caption_move()
             return
         if not bool(QGuiApplication.mouseButtons() & Qt.MouseButton.LeftButton):
             self.endSystemMove()
@@ -225,7 +266,11 @@ class NativeFramelessHost(QWidget):
             self._move_timer.stop()
         if not state:
             return
+        if bool(state.get("system_move", False)):
+            self._record_native_caption_result(state)
+            return
         target = self._snap_target_for_cursor()
+        self._hide_snap_preview()
         if target is not None:
             snap_rect, snap_type = target
             self._store_normal_geometry(QRect(self.geometry()))
@@ -240,7 +285,9 @@ class NativeFramelessHost(QWidget):
 
     @Slot()
     def toggleMaximized(self) -> None:
-        if self.isMaximized():
+        if sys.platform == "win32" and self._send_native_maximize_command():
+            pass
+        elif self.isMaximized():
             self.showNormal()
         else:
             self._save_normal_geometry()
@@ -311,13 +358,25 @@ class NativeFramelessHost(QWidget):
             pass
 
     def showNormal(self):  # noqa: N802 - Qt API compatibility
-        super().showNormal()
+        if sys.platform == "win32" and self.isVisible():
+            try:
+                user32.SendMessageW(wintypes.HWND(int(self.winId())), WM_SYSCOMMAND, SC_RESTORE, 0)
+            except Exception:
+                super().showNormal()
+        else:
+            super().showNormal()
         self.maximizedChanged.emit()
         self.geometryChanged.emit()
 
     def showMaximized(self):  # noqa: N802
         self._save_normal_geometry(force=True)
-        super().showMaximized()
+        if sys.platform == "win32":
+            try:
+                user32.SendMessageW(wintypes.HWND(int(self.winId())), WM_SYSCOMMAND, SC_MAXIMIZE, 0)
+            except Exception:
+                super().showMaximized()
+        else:
+            super().showMaximized()
         self.maximizedChanged.emit()
         self.geometryChanged.emit()
 
@@ -363,18 +422,19 @@ class NativeFramelessHost(QWidget):
             return False, 0
         if msg.message == WM_NCCALCSIZE:
             return True, 0
+        if msg.message == WM_NCLBUTTONDOWN:
+            try:
+                if int(msg.wParam) == HTCAPTION:
+                    self.captionPressed.emit()
+            except Exception:
+                pass
         if msg.message == WM_NCHITTEST:
             hit = self._hit_test(int(msg.lParam))
             if hit is not None:
                 return True, hit
         return False, 0
 
-    def _make_lparam(self, x: int, y: int) -> int:
-        return (int(y) & 0xFFFF) << 16 | (int(x) & 0xFFFF)
-
     def _hit_test(self, lparam: int):
-        if self.isMaximized() or self.isFullScreen():
-            return None
         try:
             rect = wintypes.RECT()
             hwnd = wintypes.HWND(int(self.winId()))
@@ -388,29 +448,72 @@ class NativeFramelessHost(QWidget):
             except Exception:
                 scale = 1.0
             border = max(5, int(round(self._resize_border * scale)))
-            left = x < rect.left + border
-            right = x >= rect.right - border
-            top = y < rect.top + border
-            bottom = y >= rect.bottom - border
-            if top and left:
-                return HTTOPLEFT
-            if top and right:
-                return HTTOPRIGHT
-            if bottom and left:
-                return HTBOTTOMLEFT
-            if bottom and right:
-                return HTBOTTOMRIGHT
-            if left:
-                return HTLEFT
-            if right:
-                return HTRIGHT
-            if top:
-                return HTTOP
-            if bottom:
-                return HTBOTTOM
+            if not self._is_maximized_state() and not self.isFullScreen():
+                left = x < rect.left + border
+                right = x >= rect.right - border
+                top = y < rect.top + border
+                bottom = y >= rect.bottom - border
+                if top and left:
+                    return HTTOPLEFT
+                if top and right:
+                    return HTTOPRIGHT
+                if bottom and left:
+                    return HTBOTTOMLEFT
+                if bottom and right:
+                    return HTBOTTOMRIGHT
+                if left:
+                    return HTLEFT
+                if right:
+                    return HTRIGHT
+                if top:
+                    return HTTOP
+                if bottom:
+                    return HTBOTTOM
+            local_x = (x - rect.left) / scale
+            local_y = (y - rect.top) / scale
+            if self._caption_hit_test(local_x, local_y):
+                return HTCAPTION
         except Exception:
             return None
         return None
+
+    def _caption_hit_test(self, local_x: float, local_y: float) -> bool:
+        if self.isFullScreen():
+            return False
+        try:
+            if local_y < 0 or local_y > float(self._title_bar_height):
+                return False
+            if self._caption_regions:
+                for left, right in self._caption_regions:
+                    if float(left) <= local_x <= float(right):
+                        return True
+                return False
+            right_block = 170
+            return 0 <= local_x <= max(0, self.width() - right_block)
+        except Exception:
+            return False
+
+    def _is_maximized_state(self) -> bool:
+        if sys.platform == "win32":
+            try:
+                return bool(user32.IsZoomed(wintypes.HWND(int(self.winId()))))
+            except Exception:
+                pass
+        return bool(self.isMaximized())
+
+    def _send_native_maximize_command(self) -> bool:
+        try:
+            hwnd = wintypes.HWND(int(self.winId()))
+            if not hwnd:
+                return False
+            if self._is_maximized_state():
+                user32.SendMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE, 0)
+            else:
+                self._save_normal_geometry()
+                user32.SendMessageW(hwnd, WM_SYSCOMMAND, SC_MAXIMIZE, 0)
+            return True
+        except Exception:
+            return False
 
     def _apply_windows_chrome(self) -> None:
         if sys.platform != "win32":
@@ -419,8 +522,9 @@ class NativeFramelessHost(QWidget):
             hwnd = wintypes.HWND(int(self.winId()))
             try:
                 style = user32.GetWindowLongW(hwnd, GWL_STYLE)
-                style |= WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CAPTION
+                style |= WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
                 user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+                user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
             except Exception:
                 pass
             pref = ctypes.c_int(DWMWCP_ROUND)
@@ -526,12 +630,17 @@ class NativeFramelessHost(QWidget):
         try:
             dw = int(frame.width()) - int(client_geom.width())
             dh = int(frame.height()) - int(client_geom.height())
-            if abs(dw) <= 96 and abs(dh) <= 96:
+            if 0 <= dw <= 96 and 0 <= dh <= 96:
                 self._normal_frame_geometry = QRect(frame)
         except Exception:
-            self._normal_frame_geometry = QRect(frame)
+            pass
 
     def _frame_geometry_for_client(self, client_geom: QRect, reference_client: QRect | None = None) -> QRect:
+        if sys.platform == "win32":
+            try:
+                return self._native_outer_rect_for_client(wintypes.HWND(int(self.winId())), client_geom)
+            except Exception:
+                pass
         reference = QRect(reference_client or self._normal_geometry)
         frame = QRect(self._normal_frame_geometry)
         if frame.isValid() and reference.isValid():
@@ -540,7 +649,7 @@ class NativeFramelessHost(QWidget):
                 dy = int(frame.y()) - int(reference.y())
                 dw = int(frame.width()) - int(reference.width())
                 dh = int(frame.height()) - int(reference.height())
-                if abs(dx) <= 96 and abs(dy) <= 96 and abs(dw) <= 128 and abs(dh) <= 128:
+                if abs(dx) <= 96 and abs(dy) <= 96 and 0 <= dw <= 128 and 0 <= dh <= 128:
                     return QRect(
                         int(client_geom.x()) + dx,
                         int(client_geom.y()) + dy,
@@ -551,8 +660,15 @@ class NativeFramelessHost(QWidget):
                 pass
         return QRect(client_geom)
 
-    def _set_restore_bounds_for_client_geometry(self, hwnd: wintypes.HWND, client_geom: QRect) -> QRect:
-        outer = self._frame_geometry_for_client(client_geom)
+    def _native_outer_rect_for_client(self, hwnd: wintypes.HWND, client_geom: QRect) -> QRect:
+        # WM_NCCALCSIZE collapses the native frame into the client area, so the
+        # visible window bounds already match client_geom. Expanding with
+        # AdjustWindowRectEx would poison WINDOWPLACEMENT and make every native
+        # maximize/snap restore save a slightly smaller normal size.
+        return QRect(client_geom)
+
+    def _set_restore_bounds_for_client_geometry(self, hwnd: wintypes.HWND, client_geom: QRect, reference_client: QRect | None = None) -> QRect:
+        outer = self._frame_geometry_for_client(client_geom, reference_client)
         try:
             placement = WINDOWPLACEMENT()
             placement.length = ctypes.sizeof(WINDOWPLACEMENT)
@@ -564,8 +680,91 @@ class NativeFramelessHost(QWidget):
                 user32.SetWindowPlacement(hwnd, ctypes.byref(placement))
         except Exception:
             pass
-        self._normal_frame_geometry = QRect(outer)
         return outer
+
+    def _restore_drag_target(self, normal: QRect, local_x: float = -1.0, local_y: float = -1.0) -> QRect:
+        cursor = QCursor.pos()
+        ratio_x = 0.5
+        current_width = max(1.0, float(self._quick.width() or self.geometry().width()))
+        if local_x is not None and local_x >= 0:
+            ratio_x = max(0.0, min(1.0, float(local_x) / current_width))
+        title_y = int(local_y if local_y is not None and local_y >= 0 else 16)
+        title_y = max(6, min(42, title_y))
+        return QRect(
+            int(cursor.x() - normal.width() * ratio_x),
+            int(cursor.y() - title_y),
+            int(normal.width()),
+            int(normal.height()),
+        )
+
+    def _begin_native_caption_move(self, local_x: float = -1.0, local_y: float = -1.0) -> bool:
+        if sys.platform != "win32":
+            return False
+        try:
+            hwnd_value = int(self.winId())
+            hwnd = wintypes.HWND(hwnd_value)
+        except Exception:
+            return False
+        if not hwnd_value:
+            return False
+        normal = QRect(self._normal_geometry)
+        if not normal.isValid() or normal.width() < self.minimumWidth() or normal.height() < self.minimumHeight():
+            normal = QRect(160, 90, 1080, 700)
+
+        special = bool(self.isMaximized() or self.isFullScreen() or self._is_snap_geometry())
+        restore_geometry = QRect(normal)
+        if not special:
+            self._save_normal_geometry()
+            normal = QRect(self._normal_geometry)
+            restore_geometry = QRect(normal)
+        else:
+            restore_geometry = self._restore_drag_target(normal, local_x, local_y)
+            self._set_restore_bounds_for_client_geometry(hwnd, restore_geometry, normal)
+            self._normal_geometry = QRect(restore_geometry)
+
+        self._move_state = {
+            "system_move": True,
+            "normal_geometry": QRect(restore_geometry),
+            "started_special": special,
+        }
+        self._ensure_move_timer()
+        try:
+            user32.ReleaseCapture()
+            user32.SendMessageW(hwnd, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0)
+        except Exception:
+            self._move_state = None
+            self._stop_move_timer()
+            return False
+        if self._move_state and not bool(QGuiApplication.mouseButtons() & Qt.MouseButton.LeftButton):
+            self._finish_native_caption_move()
+        return True
+
+    def _finish_native_caption_move(self) -> None:
+        state = self._move_state
+        self._move_state = None
+        self._stop_move_timer()
+        if not state:
+            return
+        self._record_native_caption_result(state)
+
+    def _stop_move_timer(self) -> None:
+        if self._move_timer.isActive():
+            self._move_timer.stop()
+
+    def _record_native_caption_result(self, state: dict) -> None:
+        normal = QRect(state.get("normal_geometry", self._normal_geometry))
+        if self.isMaximized() or self.isFullScreen() or self._is_snap_geometry():
+            if normal.isValid() and normal.width() >= self.minimumWidth() and normal.height() >= self.minimumHeight():
+                self._normal_geometry = QRect(normal)
+                self._remember_normal_frame_geometry(normal)
+        elif bool(state.get("started_special", False)) and normal.isValid():
+            current = QRect(self.geometry())
+            self._normal_geometry = QRect(current.x(), current.y(), normal.width(), normal.height())
+            self._remember_normal_frame_geometry(self._normal_geometry)
+        elif self._should_store_as_normal_geometry():
+            self._store_normal_geometry(QRect(self.geometry()))
+        self.maximizedChanged.emit()
+        self.geometryChanged.emit()
 
     def _begin_manual_restore_move(self, local_x: float = -1.0, local_y: float = -1.0) -> None:
         if sys.platform != "win32":
@@ -575,19 +774,25 @@ class NativeFramelessHost(QWidget):
             normal = QRect(160, 90, 1080, 700)
         try:
             cursor = QCursor.pos()
-            ratio_x = 0.5
-            current_width = max(1.0, float(self._quick.width() or self.geometry().width()))
-            if local_x is not None and local_x >= 0:
-                ratio_x = max(0.0, min(1.0, float(local_x) / current_width))
-            title_y = int(local_y if local_y is not None and local_y >= 0 else 16)
-            title_y = max(6, min(42, title_y))
-            new_x = int(cursor.x() - normal.width() * ratio_x)
-            new_y = int(cursor.y() - title_y)
-            target = QRect(new_x, new_y, normal.width(), normal.height())
+            target = self._restore_drag_target(normal, local_x, local_y)
 
-            self._set_restore_bounds_for_client_geometry(wintypes.HWND(int(self.winId())), target)
-            super().showNormal()
-            self.setGeometry(target)
+            hwnd = wintypes.HWND(int(self.winId()))
+            self._set_restore_bounds_for_client_geometry(hwnd, target, normal)
+            self._normal_geometry = QRect(target)
+            updates_enabled = self.updatesEnabled()
+            self.setUpdatesEnabled(False)
+            try:
+                # Prime Qt's normal geometry cache before leaving maximized
+                # state. Otherwise Windows can expose the old restore rectangle
+                # for one frame and then jump to the intended drag rectangle.
+                self.setGeometry(target)
+                self._set_restore_bounds_for_client_geometry(hwnd, target, target)
+                super().showNormal()
+                if QRect(self.geometry()) != target:
+                    self.setGeometry(target)
+            finally:
+                self.setUpdatesEnabled(updates_enabled)
+                self.update()
             self._move_state = {
                 "local_x": float(cursor.x() - target.x()),
                 "local_y": float(cursor.y() - target.y()),
@@ -619,6 +824,25 @@ class NativeFramelessHost(QWidget):
         except Exception:
             return None
         return None
+
+    def _update_snap_preview(self) -> None:
+        target = self._snap_target_for_cursor()
+        if target is None:
+            self._hide_snap_preview()
+            return
+        snap_rect, snap_type = target
+        if self._snap_preview_rect is not None and self._snap_preview_rect == snap_rect and self._snap_preview_type == snap_type:
+            return
+        self._snap_preview_rect = QRect(snap_rect)
+        self._snap_preview_type = snap_type
+        self.snapPreviewChanged.emit("main", snap_rect.x(), snap_rect.y(), snap_rect.width(), snap_rect.height(), True)
+
+    def _hide_snap_preview(self) -> None:
+        if self._snap_preview_rect is None and self._snap_preview_type is None:
+            return
+        self._snap_preview_rect = None
+        self._snap_preview_type = None
+        self.snapPreviewChanged.emit("main", 0, 0, 0, 0, False)
 
     def _save_geometry_to_settings(self) -> None:
         g = self._normal_geometry if self._normal_geometry.isValid() else self.geometry()

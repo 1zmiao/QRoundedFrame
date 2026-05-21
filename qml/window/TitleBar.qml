@@ -15,6 +15,13 @@ Item {
     property bool windowMaximized: false
     property bool showNavToggle: true
     property bool showColorButton: Core.Theme.showColorButton
+    property bool useNativeCaption: false
+    property int rightButtonSize: Math.max(Core.Theme.dp(26), Math.round(height * 0.8))
+    property real nativeTitleBarHeight: height
+    property real nativeCaptionLeftA: leftArea.x + titleDragBox.x
+    property real nativeCaptionRightA: nativeCaptionLeftA + titleDragBox.width
+    property real nativeCaptionLeftB: dragArea.x
+    property real nativeCaptionRightB: dragArea.x + dragArea.width
 
     property bool _dragStarted: false
     property real _pressX: 0
@@ -38,7 +45,14 @@ Item {
         root.moveRequested(p.x, p.y)
     }
 
+    function closeMenus() {
+        menuPopup.close()
+        colorPopup.close()
+        paletteContextMenu.close()
+    }
+
     function dragPress(item, mx, my) {
+        closeMenus()
         root.activateRequested()
         _pressItem = item
         _pressX = mx
@@ -139,6 +153,7 @@ Item {
 
             MouseArea {
                 anchors.fill: parent
+                enabled: !root.useNativeCaption
                 acceptedButtons: Qt.LeftButton
                 onPressed: function(mouse) { root.dragPress(titleDragBox, mouse.x, mouse.y) }
                 onPositionChanged: function(mouse) { if (pressed) root.dragMove(titleDragBox, mouse.x, mouse.y) }
@@ -170,6 +185,7 @@ Item {
         anchors.right: rightArea.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
+        enabled: !root.useNativeCaption
         acceptedButtons: Qt.LeftButton
         preventStealing: false
         hoverEnabled: false
@@ -185,15 +201,17 @@ Item {
         id: rightArea
         z: 2
         anchors.right: parent.right
-        anchors.rightMargin: Core.Theme.dp(7)
-        anchors.verticalCenter: parent.verticalCenter
-        spacing: Core.Theme.dp(1)
+        anchors.rightMargin: Core.Theme.dp(5)//右上角按钮距离窗口的间距
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        spacing: 0
 
         IconButton {
             id: paletteButton
             visible: root.showColorButton
-            width: visible ? Core.Theme.dp(28) : 0
-            height: Core.Theme.dp(24)
+            width: visible ? root.rightButtonSize : 0
+            height: root.rightButtonSize
+            anchors.verticalCenter: parent.verticalCenter
             iconName: "palette"
             strokeWidth: 0.90
             noBorder: true
@@ -218,8 +236,9 @@ Item {
 
         IconButton {
             id: themeButton
-            width: Core.Theme.dp(28)
-            height: Core.Theme.dp(24)
+            width: root.rightButtonSize
+            height: root.rightButtonSize
+            anchors.verticalCenter: parent.verticalCenter
             iconName: Core.Theme.mode === "dark" ? "sun" : "moon"
             strokeWidth: 0.90
             noBorder: true
@@ -232,8 +251,9 @@ Item {
         }
 
         IconButton {
-            width: Core.Theme.dp(28)
-            height: Core.Theme.dp(24)
+            width: root.rightButtonSize
+            height: root.rightButtonSize
+            anchors.verticalCenter: parent.verticalCenter
             accent: false
             noBorder: true
             strokeWidth: root.alwaysOnTop ? 1.0 : 0.90
@@ -243,16 +263,22 @@ Item {
             onClicked: root.alwaysOnTopRequested(!root.alwaysOnTop)
         }
 
-        Rectangle {
-            width: 1
-            height: Core.Theme.dp(16)
-            anchors.verticalCenter: parent.verticalCenter
-            color: Core.Theme.color.hairline
+        Item {
+            width: Core.Theme.dp(9) //右上角6个按钮中间距离分隔符竖线的间距
+            height: parent.height
+
+            Rectangle {
+                width: 1
+                height: root.rightButtonSize
+                anchors.centerIn: parent
+                color: Core.Theme.color.hairline
+                opacity: 0.72
+            }
         }
 
-        IconButton { width: Core.Theme.dp(28); height: Core.Theme.dp(24); iconName: "minimize"; strokeWidth: 0.90; noBorder: true; onClicked: root.minimizeRequested() }
-        IconButton { width: Core.Theme.dp(28); height: Core.Theme.dp(24); iconName: root.windowMaximized ? "restore" : "maximize"; strokeWidth: 0.90; noBorder: true; onClicked: root.toggleMaximizeRequested() }
-        IconButton { width: Core.Theme.dp(28); height: Core.Theme.dp(24); iconName: "close"; strokeWidth: 0.90; noBorder: true; onClicked: root.closeRequested() }
+        IconButton { width: root.rightButtonSize; height: root.rightButtonSize; anchors.verticalCenter: parent.verticalCenter; iconName: "minimize"; strokeWidth: 0.90; noBorder: true; onClicked: root.minimizeRequested() }
+        IconButton { width: root.rightButtonSize; height: root.rightButtonSize; anchors.verticalCenter: parent.verticalCenter; iconName: root.windowMaximized ? "restore" : "maximize"; strokeWidth: 0.90; noBorder: true; onClicked: root.toggleMaximizeRequested() }
+        IconButton { width: root.rightButtonSize; height: root.rightButtonSize; anchors.verticalCenter: parent.verticalCenter; iconName: "close"; strokeWidth: 0.90; noBorder: true; onClicked: root.closeRequested() }
     }
 
     AppContextMenu {

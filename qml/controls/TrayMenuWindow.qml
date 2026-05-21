@@ -4,25 +4,46 @@ import "../core" as Core
 
 Window {
     id: root
-    flags: Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus | Qt.NoDropShadowWindowHint
+    flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus | Qt.NoDropShadowWindowHint | Qt.WindowStaysOnTopHint
     color: "transparent"
     visible: false
 
-    property int shadowMargin: Core.Theme.dp(10)
-    property int menuWidth: Core.Theme.dp(178)
+    property int shadowMargin: Core.Theme.dp(18)
+    property int menuWidth: Core.Theme.dp(184)
     property int menuHeight: Core.Theme.dp(104)
+    property double openedAt: 0
+    property point lastCursorPos: Qt.point(0, 0)
     width: menuWidth + shadowMargin * 2
     height: menuHeight + shadowMargin * 2
 
     function openAt(px, py) {
         const margin = Core.Theme.dp(6)
-        let nx = px - width + Core.Theme.dp(8)
-        let ny = py - height - Core.Theme.dp(8)
-        if (nx < margin) nx = margin
-        if (ny < margin) ny = py + Core.Theme.dp(8)
-        x = nx
-        y = ny
+        const area = (typeof App !== "undefined" && App && App.tray && App.tray.availableGeometryAt)
+            ? App.tray.availableGeometryAt(px, py) : ({})
+        let panelX = px - root.menuWidth
+        let panelY = py - root.menuHeight
+        if (area && area.w > 0 && area.h > 0) {
+            const leftLimit = area.x + margin
+            const topLimit = area.y + margin
+            const rightLimit = area.x + area.w - root.menuWidth - margin
+            const bottomLimit = area.y + area.h - root.menuHeight - margin
+            panelX = px - root.menuWidth >= leftLimit ? px - root.menuWidth : px
+            panelY = py - root.menuHeight >= topLimit ? py - root.menuHeight : py
+            panelX = Math.max(leftLimit, Math.min(rightLimit, panelX))
+            panelY = Math.max(topLimit, Math.min(bottomLimit, panelY))
+        } else {
+            if (panelX < margin)
+                panelX = px
+            if (panelY < margin)
+                panelY = py
+        }
+        x = panelX - root.shadowMargin
+        y = panelY - root.shadowMargin
+        lastCursorPos = Qt.point(px, py)
+        openedAt = Date.now()
         visible = true
+        if (typeof App !== "undefined" && App && App.tray && App.tray.raiseTrayMenuWindow)
+            App.tray.raiseTrayMenuWindow(root)
     }
 
     function toggleAt(px, py) {
@@ -34,33 +55,25 @@ Window {
 
     function closeMenu() { visible = false }
 
-    Rectangle {
-        anchors.fill: panel
-        anchors.topMargin: Core.Theme.dp(5)
-        anchors.leftMargin: Core.Theme.dp(2)
-        anchors.rightMargin: Core.Theme.dp(2)
-        radius: Core.Theme.radius.popup
-        color: Core.Theme.color.shadow
-        opacity: Core.Theme.mode === "dark" ? 0.36 : 0.18
-    }
-
-    Rectangle {
-        anchors.fill: panel
-        anchors.topMargin: Core.Theme.dp(2)
-        anchors.leftMargin: Core.Theme.dp(1)
-        anchors.rightMargin: Core.Theme.dp(1)
-        radius: Core.Theme.radius.popup
-        color: Core.Theme.color.shadow
-        opacity: Core.Theme.mode === "dark" ? 0.22 : 0.10
+    PanelShadow {
+        x: panel.x
+        y: panel.y
+        width: panel.width
+        height: panel.height
+        radius: panel.radius
+        visible: root.visible
+        z: 0
     }
 
     Rectangle {
         id: panel
+        z: 1
         x: root.shadowMargin
         y: root.shadowMargin
         width: root.menuWidth
         height: root.menuHeight
         radius: Core.Theme.radius.popup
+        antialiasing: true
         color: Core.Theme.color.card
         border.color: Core.Theme.color.outlineAccent
         border.width: 1
@@ -92,14 +105,14 @@ Window {
         }
     }
 
-    onActiveChanged: if (!active && visible) closeDelay.restart()
-    Timer { id: closeDelay; interval: 90; repeat: false; onTriggered: if (!root.active) root.visible = false }
     Timer {
         id: outsideClickWatch
         interval: 45
         repeat: true
         running: root.visible
         onTriggered: {
+            if (Date.now() - root.openedAt < 180)
+                return
             if (typeof App !== "undefined" && App && App.tray && App.tray.mousePressedOutside(root.x, root.y, root.width, root.height))
                 root.closeMenu()
         }

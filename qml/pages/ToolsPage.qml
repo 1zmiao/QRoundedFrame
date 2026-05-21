@@ -21,7 +21,7 @@ Item {
                 anchors.margins: 18
                 spacing: 10
                 Text { text: "工具"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.sp(24); font.bold: true }
-                Text { width: parent.width; text: "这里可以放置软件专属工具。重型控件建议懒加载，或由 C++/Python 模型暴露给 QML。"; color: Core.Theme.color.mutedText; wrapMode: Text.WordWrap }
+                Text { width: parent.width; text: "这里可以放置软件专属工具。重型控件建议懒加载，或由 C++/Python 模型暴露给 QML。"; color: Core.Theme.color.mutedText; font.pixelSize: Core.Theme.fontSize.body; wrapMode: Text.WordWrap }
                 Row {
                     spacing: 8
                     AppButton { text: "工具操作"; variant: "primary" }

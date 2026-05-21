@@ -37,16 +37,13 @@ Popup {
     }
 
     background: Item {
-        Rectangle {
-            anchors.fill: parent
-            anchors.topMargin: Core.Theme.dp(4)
-            anchors.leftMargin: Core.Theme.dp(2)
-            anchors.rightMargin: Core.Theme.dp(2)
-            radius: Core.Theme.radius.popup
-            color: Core.Theme.color.shadow
-            opacity: Core.Theme.mode === "dark" ? 0.30 : 0.14
+        PanelShadow {
+            anchors.fill: panel
+            radius: panel.radius
+            strength: Core.Theme.mode === "dark" ? 0.42 : 0.24
         }
         Rectangle {
+            id: panel
             anchors.fill: parent
             radius: Core.Theme.radius.popup
             color: Core.Theme.color.card

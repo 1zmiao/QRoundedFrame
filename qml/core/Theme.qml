@@ -8,7 +8,7 @@ QtObject {
     property color primary: (typeof App !== "undefined" && App && App.theme) ? App.theme.primaryColor : "#537FCD"
     property real fontScale: (typeof App !== "undefined" && App && App.theme) ? App.theme.fontScale : 1.0
     property int settingsRevision: (typeof App !== "undefined" && App && App.settings) ? App.settings.revision : 0
-    property int baseFontSize: Math.max(11, Math.min(20, Math.round(13 * fontScale)))
+    property int baseFontSize: Math.max(12, Math.min(20, Math.round(13 * fontScale)))
     property real controlScale: Math.max(0.90, Math.min(1.24, fontScale))
     property bool showColorButton: (typeof App !== "undefined" && App && App.theme) ? App.theme.showColorButton : true
 
@@ -22,11 +22,11 @@ QtObject {
         )
     }
     function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
-    function sp(v) { return Math.max(1, Math.round(v * fontScale)) }
+    function sp(v) { return Math.max(12, Math.round(v * fontScale)) }
     function fs(v) { return sp(v) }
     function dp(v) { return Math.max(1, Math.round(v * controlScale)) }
     function setBaseFontSize(px) {
-        const next = Math.max(11, Math.min(20, Math.round(Number(px))))
+        const next = Math.max(12, Math.min(20, Math.round(Number(px))))
         if (typeof App !== "undefined" && App && App.theme)
             App.theme.setFontScale(next / 13.0)
         else
@@ -74,9 +74,9 @@ QtObject {
     }
 
     property QtObject fontSize: QtObject {
-        property int tiny: theme.sp(10)
-        property int small: theme.sp(11)
-        property int caption: theme.sp(12)
+        property int tiny: theme.sp(12)
+        property int small: theme.sp(13)
+        property int caption: theme.sp(13)
         property int control: theme.sp(13)
         property int body: theme.sp(14)
         property int subtitle: theme.sp(16)

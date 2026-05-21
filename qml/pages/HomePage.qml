@@ -46,7 +46,7 @@ Item {
                 anchors.margins: 18
                 spacing: 8
                 Text { text: "无边框窗口模板"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.sp(24); font.bold: true }
-                Text { width: parent.width; text: "这个基础模板演示可复用 QML 窗口、标题栏、页面懒加载、主题切换、普通配置和加密配置接口。"; wrapMode: Text.WordWrap; color: Core.Theme.color.mutedText }
+                Text { width: parent.width; text: "这个基础模板演示可复用 QML 窗口、标题栏、页面懒加载、主题切换、普通配置和加密配置接口。"; wrapMode: Text.WordWrap; color: Core.Theme.color.mutedText; font.pixelSize: Core.Theme.fontSize.body }
                 Text { text: "明文配置文件：" + root.configPath(); color: Core.Theme.color.mutedText; font.pixelSize: Core.Theme.sp(12); elide: Text.ElideRight; width: parent.width }
                 Text { text: "密文配置文件：" + root.secretFile(); color: Core.Theme.color.mutedText; font.pixelSize: Core.Theme.sp(12); elide: Text.ElideRight; width: parent.width }
             }
@@ -68,7 +68,7 @@ Item {
                 anchors.margins: 18
                 spacing: 10
                 Text { text: "存储接口演示"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.sp(18); font.bold: true }
-                Text { id: storageText; width: parent.width; color: Core.Theme.color.mutedText; wrapMode: Text.WordWrap; text: "同一个保存按钮会同时保存普通字段和加密字段。普通字段进入 user_data/config/settings.json，加密字段进入 user_data/secure/secrets.bin。" }
+                Text { id: storageText; width: parent.width; color: Core.Theme.color.mutedText; font.pixelSize: Core.Theme.fontSize.body; wrapMode: Text.WordWrap; text: "同一个保存按钮会同时保存普通字段和加密字段。普通字段进入 user_data/config/settings.json，加密字段进入 user_data/secure/secrets.bin。" }
 
                 AppTextField {
                     id: settingInput
@@ -134,7 +134,7 @@ Item {
                 anchors.margins: 18
                 spacing: 12
                 Text { text: "性能模式"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.sp(18); font.bold: true }
-                Text { width: parent.width; color: Core.Theme.color.mutedText; wrapMode: Text.WordWrap; text: "页面由 qml/layout/PageHost.qml 通过 Loader 懒加载，未切换到的页面不会创建。重型页面后续可以继续拆分内部 Loader，或使用 C++/Python 模型暴露给 QML。" }
+                Text { width: parent.width; color: Core.Theme.color.mutedText; font.pixelSize: Core.Theme.fontSize.body; wrapMode: Text.WordWrap; text: "页面由 qml/layout/PageHost.qml 通过 Loader 懒加载，未切换到的页面不会创建。重型页面后续可以继续拆分内部 Loader，或使用 C++/Python 模型暴露给 QML。" }
                 AppCheckBox { text: "示例开关会保存到普通配置"; storageKey: "demo/switch"; autoLoad: true }
                 AppTextField { width: parent.width; placeholderText: "示例输入"; storageKey: "demo/performanceInput"; autoLoad: true }
             }

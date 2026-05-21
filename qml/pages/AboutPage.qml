@@ -3,13 +3,17 @@ import "../core" as Core
 import "../controls"
 
 Item {
+    id: root
+
+    readonly property int cardPadding: Core.Theme.dp(18)
+
     DragScrollArea {
         anchors.fill: parent
         spacing: 14
 
         Rectangle {
             width: parent.width
-            height: 148
+            height: Math.max(Core.Theme.dp(142), heroContent.implicitHeight + root.cardPadding * 2)
             radius: Core.Theme.radius.card
             color: Core.Theme.color.hero
             border.color: Core.Theme.color.outlineAccent
@@ -17,15 +21,23 @@ Item {
             BackgroundRipple { radius: parent.radius }
 
             Column {
+                id: heroContent
                 z: 1
                 anchors.fill: parent
-                anchors.margins: 18
+                anchors.margins: root.cardPadding
                 spacing: 8
-                Text { text: "关于这个框架"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.sp(24); font.bold: true }
+
+                Text {
+                    text: "关于这个框架"
+                    color: Core.Theme.color.text
+                    font.pixelSize: Core.Theme.sp(24)
+                    font.bold: true
+                }
                 Text {
                     width: parent.width
-                    text: "这是一个面向后续桌面软件复用的 PySide6 + QML 无边框窗口基础模板。主界面、子窗口、标题栏、配置、加密存储、托盘和常用控件都按组件化方式拆分。"
+                    text: "一个面向后续桌面软件复用的 PySide6 + QML 无边框窗口模板。窗口壳、页面、主题、配置、密文存储、托盘和控件都按模块拆分，可以直接作为新项目的基础工程。"
                     color: Core.Theme.color.mutedText
+                    font.pixelSize: Core.Theme.fontSize.body
                     wrapMode: Text.WordWrap
                 }
             }
@@ -33,7 +45,7 @@ Item {
 
         Rectangle {
             width: parent.width
-            height: 254
+            height: behaviorContent.implicitHeight + root.cardPadding * 2
             radius: Core.Theme.radius.card
             color: Core.Theme.color.card
             border.color: Core.Theme.color.outlineAccent
@@ -41,19 +53,33 @@ Item {
             BackgroundRipple { radius: parent.radius }
 
             Column {
+                id: behaviorContent
                 z: 1
                 anchors.fill: parent
-                anchors.margins: 18
+                anchors.margins: root.cardPadding
                 spacing: 9
-                Text { text: "窗口行为实现"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.sp(18); font.bold: true }
-                Text { width: parent.width; color: Core.Theme.color.mutedText; wrapMode: Text.WordWrap; text: "FramelessWindow.qml 是统一窗口壳层。标题栏只在拖动距离超过阈值后才通知 Python 开始移动，所以单击最大化标题栏不会错误复原窗口。窗口移动由 app/bridge/window_controller.py 统一处理，鼠标释放丢失时还有 16ms 轮询兜底，贴边预览和最终最大化都从同一个控制器发出。" }
-                Text { width: parent.width; color: Core.Theme.color.mutedText; wrapMode: Text.WordWrap; text: "当前版本使用原生窗口样式恢复系统级阴影，避免外部 QML 阴影窗口跟不上拖动或抢占层级。Windows 下由 WM_NCHITTEST 处理边缘缩放命中，标题栏拖拽使用 WM_NCLBUTTONDOWN/HTCAPTION 原生路径，最大化/全屏时禁用圆角和边缘缩放，恢复后回到普通窗口状态。" }
+
+                Text { text: "窗口行为"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.sp(18); font.bold: true }
+                Text {
+                    width: parent.width
+                    color: Core.Theme.color.mutedText
+                    font.pixelSize: Core.Theme.fontSize.body
+                    wrapMode: Text.WordWrap
+                    text: "Windows 主窗口由 app/windows_host.py 使用 QWidget + QQuickWidget 承载 QML 内容，子窗口由 app/bridge/window_controller.py 安装原生事件过滤器；标题栏拖拽和边缘缩放都通过 WM_NCHITTEST 交给系统处理。Linux 继续使用 QML Window 路径，保留原有平台拖拽和缩放逻辑。"
+                }
+                Text {
+                    width: parent.width
+                    color: Core.Theme.color.mutedText
+                    font.pixelSize: Core.Theme.fontSize.body
+                    wrapMode: Text.WordWrap
+                    text: "最大化、双击标题栏、顶部贴边、左右贴边之后再拖拽标题栏，Windows 会走原生 HTCAPTION 行为复原并跟随鼠标移动，因此半透明贴边预览、Aero Snap 和 Snap Assist 都由系统触发；QML 贴边预览保留给 Linux 和原生链路不可用时的兜底路径。"
+                }
             }
         }
 
         Rectangle {
             width: parent.width
-            height: 270
+            height: advantageContent.implicitHeight + root.cardPadding * 2
             radius: Core.Theme.radius.card
             color: Core.Theme.color.card
             border.color: Core.Theme.color.outlineAccent
@@ -61,19 +87,26 @@ Item {
             BackgroundRipple { radius: parent.radius }
 
             Column {
+                id: advantageContent
                 z: 1
                 anchors.fill: parent
-                anchors.margins: 18
+                anchors.margins: root.cardPadding
                 spacing: 9
-                Text { text: "界面和性能优化"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.sp(18); font.bold: true }
-                Text { width: parent.width; color: Core.Theme.color.mutedText; wrapMode: Text.WordWrap; text: "页面由 qml/layout/PageHost.qml 使用 Loader 懒加载，未切换到的页面不会创建，重页面后续可以继续拆分成内部 Loader 或 C++/Python 模型。导航栏、弹窗、按钮、文本框、右键菜单和标题栏按钮全部是可复用 QML 组件。" }
-                Text { width: parent.width; color: Core.Theme.color.mutedText; wrapMode: Text.WordWrap; text: "主题切换由 ThemeTransitionLayer 播放 5 层延迟圆形扩散。窗口、标题栏、侧栏和卡片都把扩散层放在背景与文字之间的底层位置，所以能看到背景涟漪，但不会盖住文字和控件。主题色集中在 core/Theme.qml 中生成 token，图标集中在 core/Icons.qml 中绘制，便于换肤和替换图标体系。" }
+
+                Text { text: "软件优点"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.sp(18); font.bold: true }
+                Text {
+                    width: parent.width
+                    color: Core.Theme.color.mutedText
+                    font.pixelSize: Core.Theme.fontSize.body
+                    wrapMode: Text.WordWrap
+                    text: "• Windows 无边框拖拽、缩放、贴边和最大化复原接近原生窗口体验。\n• QML 负责界面渲染，Python 负责窗口、配置、托盘和服务桥接。\n• 页面使用 Loader 懒加载，未访问页面不会提前创建。\n• 主题 token、图标、标题栏、侧栏、菜单、Toast、弹窗和表单控件都可复用。\n• 普通配置和密文配置分离，适合工具类软件保存偏好和敏感字段。"
+                }
             }
         }
 
         Rectangle {
             width: parent.width
-            height: 230
+            height: interfaceContent.implicitHeight + root.cardPadding * 2
             radius: Core.Theme.radius.card
             color: Core.Theme.color.card
             border.color: Core.Theme.color.outlineAccent
@@ -81,13 +114,61 @@ Item {
             BackgroundRipple { radius: parent.radius }
 
             Column {
+                id: interfaceContent
                 z: 1
                 anchors.fill: parent
-                anchors.margins: 18
+                anchors.margins: root.cardPadding
                 spacing: 9
-                Text { text: "存储和扩展接口"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.sp(18); font.bold: true }
-                Text { width: parent.width; color: Core.Theme.color.mutedText; wrapMode: Text.WordWrap; text: "普通配置写入软件根目录 user_data/config/settings.json。密文配置写入 user_data/secure/secrets.bin，文件名保持简短，文件内容是加密后的乱码。控件可以直接设置 storageKey；需要加密时继承 SecureTextField 或使用 StorageBinding { encrypted: true }。" }
-                Text { width: parent.width; color: Core.Theme.color.mutedText; wrapMode: Text.WordWrap; text: "后续如果需要更强的系统原生能力，可以在 app/native/ 下补 C++ helper，把 Windows DWM、WM_NCHITTEST、Linux X11/Wayland 特殊行为封装成同一组 Python 可调用接口。" }
+
+                Text { text: "可复用接口"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.sp(18); font.bold: true }
+                Text {
+                    width: parent.width
+                    color: Core.Theme.color.mutedText
+                    font.pixelSize: Core.Theme.fontSize.body
+                    wrapMode: Text.WordWrap
+                    text: "App.settings 提供 valueOr、setValue、remove；App.secrets 提供加密版 setValue、value、remove；App.theme 提供 setMode、toggleMode、setPrimaryColor、setFontScale、setShowColorButton。"
+                }
+                Text {
+                    width: parent.width
+                    color: Core.Theme.color.mutedText
+                    font.pixelSize: Core.Theme.fontSize.body
+                    wrapMode: Text.WordWrap
+                    text: "App.window 负责子窗口 restoreWindowState、saveWindowState、toggleMaximized、beginMove、updateMove、endMove、beginResize、endResize；App.dialogs.openChild 可打开独立页面子窗口；App.tray 负责最小化到托盘、居中恢复和退出。"
+                }
+                Text {
+                    width: parent.width
+                    color: Core.Theme.color.mutedText
+                    font.pixelSize: Core.Theme.fontSize.body
+                    wrapMode: Text.WordWrap
+                    text: "Windows 主窗口使用 NativeHost.toggleMaximized、setAlwaysOnTop、showToast、changeThemeWithRipple、setTitleBarHitTestMetrics；beginSystemMove、updateSystemMove、endSystemMove 保留为非原生链路兜底。普通输入框可直接设置 storageKey；敏感输入使用 SecureTextField 或 StorageBinding { encrypted: true }。"
+                }
+            }
+        }
+
+        Rectangle {
+            width: parent.width
+            height: extensionContent.implicitHeight + root.cardPadding * 2
+            radius: Core.Theme.radius.card
+            color: Core.Theme.color.card
+            border.color: Core.Theme.color.outlineAccent
+
+            BackgroundRipple { radius: parent.radius }
+
+            Column {
+                id: extensionContent
+                z: 1
+                anchors.fill: parent
+                anchors.margins: root.cardPadding
+                spacing: 9
+
+                Text { text: "扩展入口"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.sp(18); font.bold: true }
+                Text {
+                    width: parent.width
+                    color: Core.Theme.color.mutedText
+                    font.pixelSize: Core.Theme.fontSize.body
+                    wrapMode: Text.WordWrap
+                    text: "改窗口行为优先看 app/windows_host.py、app/bridge/window_controller.py 和 qml/window/；改界面控件看 qml/controls/；改主题看 qml/core/Theme.qml；改图标看 qml/core/Icons.qml；新增业务页面放到 qml/pages/ 并在 PageHost 中注册。"
+                }
             }
         }
     }

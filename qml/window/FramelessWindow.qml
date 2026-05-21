@@ -26,6 +26,11 @@ Window {
     property bool _localThemeAnimation: false
     property int shadowVisualInset: (cornerRadius > 0 && Qt.platform.os === "windows") ? 1 : 0
     property bool snappedVisual: false
+    property int nativeTitleBarHeight: Math.round(titleBarControl.nativeTitleBarHeight)
+    property int nativeCaptionLeftA: Math.round(titleBarControl.nativeCaptionLeftA)
+    property int nativeCaptionRightA: Math.round(titleBarControl.nativeCaptionRightA)
+    property int nativeCaptionLeftB: Math.round(titleBarControl.nativeCaptionLeftB)
+    property int nativeCaptionRightB: Math.round(titleBarControl.nativeCaptionRightB)
 
     signal windowEvent(string type, var payload)
     signal requestThemeToggle(point localPos, string nextMode)
@@ -69,6 +74,24 @@ Window {
         root.requestThemeToggle(Qt.point(cx, cy), nextMode)
     }
 
+    function adjustFontScaleByWheel(deltaY) {
+        if (!root.bridge || !root.bridge.theme)
+            return
+        if (deltaY > 0)
+            root.bridge.theme.increaseFontScale()
+        else if (deltaY < 0)
+            root.bridge.theme.decreaseFontScale()
+    }
+
+    WheelHandler {
+        acceptedModifiers: Qt.ControlModifier
+        target: null
+        onWheel: function(event) {
+            root.adjustFontScaleByWheel(event.angleDelta.y)
+            event.accepted = true
+        }
+    }
+
     Item {
         id: frameRoot
         anchors.fill: parent
@@ -108,7 +131,8 @@ Window {
                 alwaysOnTop: root.alwaysOnTop
                 showNavToggle: root.showNavToggle
                 showColorButton: root.showColorButton
-                windowMaximized: root.visibility === Window.Maximized
+                windowMaximized: root.bridge && root.bridge.window ? root.bridge.window.isMaximizedState(root) : root.visibility === Window.Maximized
+                useNativeCaption: Qt.platform.os === "windows" && root.bridge && root.bridge.window && root.bridge.window.nativeResize
 
                 onActivateRequested: {
                     root.raiseSelf()
@@ -186,7 +210,10 @@ Window {
         }
     }
 
-    SnapPreviewWindow { id: snapPreview }
+    SnapPreviewWindow {
+        id: snapPreview
+        transientParent: root
+    }
 
     Timer {
         id: chromeRefreshTimer
@@ -197,6 +224,10 @@ Window {
 
     Connections {
         target: root.bridge ? root.bridge.window : null
+        function onCaptionPressed(key) {
+            if (key === root.windowKey)
+                titleBarControl.closeMenus()
+        }
         function onSnapPreviewChanged(key, x, y, w, h, visible) {
             if (key !== root.windowKey)
                 return

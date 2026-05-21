@@ -27,7 +27,7 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         text: root.text
         color: Core.Theme.color.text
-        font.pixelSize: Core.Theme.sp(13)
+        font.pixelSize: Core.Theme.fontSize.control
         elide: Text.ElideRight
     }
 
@@ -38,7 +38,7 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         text: root.shortcut
         color: Core.Theme.color.mutedText
-        font.pixelSize: Core.Theme.sp(11)
+        font.pixelSize: Core.Theme.fontSize.tiny
     }
 
     MouseArea {

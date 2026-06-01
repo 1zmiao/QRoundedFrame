@@ -1728,14 +1728,19 @@ namespace QWK {
                                                                       m_windowHandle.data());
 
                 int frameSize = getResizeBorderThickness(hWnd);
+                // Keep the left/top native-feeling resize areas, but do not let
+                // the right/bottom resize hit-test occupy several visible client
+                // pixels. Those edges sit next to scrollbars and controls in this
+                // template, so only the actual visible edge should resize.
+                static constexpr int kRightBottomVisibleEdgeInset = 1;
 
                 bool isFixedWidth = isHostWidthFixed();
                 bool isFixedHeight = isHostHeightFixed();
                 bool isFixedSize = isHostSizeFixed();
                 bool isInLeftBorder = nativeLocalPos.x <= frameSize;
                 bool isInTopBorder = nativeLocalPos.y <= frameSize;
-                bool isInRightBorder = nativeLocalPos.x > clientWidth - frameSize;
-                bool isInBottomBorder = nativeLocalPos.y > clientHeight - frameSize;
+                bool isInRightBorder = nativeLocalPos.x >= clientWidth - kRightBottomVisibleEdgeInset;
+                bool isInBottomBorder = nativeLocalPos.y >= clientHeight - kRightBottomVisibleEdgeInset;
                 bool isInTitleBar = isInTitleBarDraggableArea(qtScenePos);
                 WindowAgentBase::SystemButton sysButtonType = WindowAgentBase::Unknown;
                 bool isInCaptionButtons = isInSystemButtons(qtScenePos, &sysButtonType);

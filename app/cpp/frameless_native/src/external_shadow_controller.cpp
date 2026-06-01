@@ -3,6 +3,7 @@
 #include <QtCore/QByteArray>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QFileInfo>
+#include <QtCore/QTimer>
 #include <QtCore/QtGlobal>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QPainter>
@@ -518,7 +519,7 @@ bool ExternalShadowController::shouldShowNativeShadow(const NativeShadowState &s
     return rect.isValid() && rect.width() > 0 && rect.height() > 0;
 }
 
-QImage ExternalShadowController::renderNativeShadowBitmap(const NativeShadowState &state, const QSize &size, int marginPx, int outerPaddingPx, int innerOverlapPx) const {
+QImage ExternalShadowController::renderNativeShadowBitmap(const NativeShadowState &state, const QSize &size, int marginPx, int outerPaddingPx, int innerOverlapPx, qreal opacityScale) const {
     if (state.source.isNull() || !size.isValid() || size.width() <= 0 || size.height() <= 0)
         return {};
 
@@ -563,7 +564,7 @@ QImage ExternalShadowController::renderNativeShadowBitmap(const NativeShadowStat
 
     QPainter painter(&result);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-    painter.setOpacity(state.opacity);
+    painter.setOpacity(qBound<qreal>(0.0, state.opacity * opacityScale, 1.0));
     painter.drawImage(dTopLeft, source, sTopLeft);
     if (dTop.width() > 0)
         painter.drawImage(dTop, source, sTop);
@@ -618,9 +619,12 @@ void ExternalShadowController::updateNativeShadowBitmap(NativeShadowState &state
         stackBehind = true;
     }
 
+    const bool firstVisiblePaint = !state.everShown && !state.shown && !state.inSizeMove && !state.sizing;
+    const qreal opacityScale = firstVisiblePaint ? 0.35 : 1.0;
+
     if (forceRepaint || sizeChanged || !state.shown) {
 
-        const QImage bitmap = renderNativeShadowBitmap(state, shadowRect.size(), marginPx, guardPx, innerOverlapPx);
+        const QImage bitmap = renderNativeShadowBitmap(state, shadowRect.size(), marginPx, guardPx, innerOverlapPx, opacityScale);
         if (bitmap.isNull()) {
             hideNativeShadow(state);
             return;
@@ -655,6 +659,21 @@ void ExternalShadowController::updateNativeShadowBitmap(NativeShadowState &state
     state.lastTargetRect = targetRect;
     state.lastShadowRect = shadowRect;
     state.shown = true;
+    if (firstVisiblePaint && !state.openingFadeScheduled) {
+        state.openingFadeScheduled = true;
+        const WId targetId = reinterpret_cast<WId>(target);
+        QTimer::singleShot(90, this, [this, targetId]() {
+            auto it = m_nativeShadowByTarget.find(targetId);
+            if (it == m_nativeShadowByTarget.end())
+                return;
+            NativeShadowState &fadeState = it.value();
+            fadeState.openingFadeScheduled = false;
+            fadeState.everShown = true;
+            syncNativeRegisteredShadow(targetId, true, true);
+        });
+    } else if (!state.openingFadeScheduled) {
+        state.everShown = true;
+    }
 #else
     Q_UNUSED(state)
     Q_UNUSED(targetRect)

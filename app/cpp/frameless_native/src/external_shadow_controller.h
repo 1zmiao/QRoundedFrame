@@ -46,6 +46,8 @@ private:
         bool shown = false;
         bool inSizeMove = false;
         bool sizing = false;
+        bool everShown = false;
+        bool openingFadeScheduled = false;
     };
 
     static QWindow *asWindow(QObject *object);
@@ -63,7 +65,7 @@ private:
     bool ensureNativeShadowWindow(NativeShadowState &state);
     bool loadNativeShadowAsset(NativeShadowState &state, const QUrl &assetUrl);
     bool shouldShowNativeShadow(const NativeShadowState &state) const;
-    QImage renderNativeShadowBitmap(const NativeShadowState &state, const QSize &size, int marginPx, int outerPaddingPx, int innerOverlapPx) const;
+    QImage renderNativeShadowBitmap(const NativeShadowState &state, const QSize &size, int marginPx, int outerPaddingPx, int innerOverlapPx, qreal opacityScale = 1.0) const;
     void updateNativeShadowBitmap(NativeShadowState &state, const QRect &targetRect, bool stackBehind, bool forceRepaint);
     static QRect nativeTargetRect(QWindow *window);
     static int dpiScaled(int value, QWindow *window);

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import os
@@ -85,7 +85,7 @@ def check_external_shadow() -> None:
         "UpdateLayeredWindow",
         "naturalShadowSourceBorder",
         "painter.drawImage",
-        "setOpacity(state.opacity)",
+        "state.opacity * opacityScale",
         "WM_ENTERSIZEMOVE",
         "WM_EXITSIZEMOVE",
         "stackShadowOnly",

@@ -348,6 +348,59 @@ namespace QWK {
         }
         return Win32WindowContext::Outside;
     }
+    static inline LRESULT trimRightBottomResizeHitTest(HWND hWnd, LPARAM lParam,
+                                                       LRESULT hitTestResult) {
+        const bool containsRight = (hitTestResult == HTRIGHT) ||
+                                   (hitTestResult == HTTOPRIGHT) ||
+                                   (hitTestResult == HTBOTTOMRIGHT);
+        const bool containsBottom = (hitTestResult == HTBOTTOM) ||
+                                    (hitTestResult == HTBOTTOMLEFT) ||
+                                    (hitTestResult == HTBOTTOMRIGHT);
+        if (!containsRight && !containsBottom) {
+            return hitTestResult;
+        }
+
+        RECT windowRect{};
+        if (!::GetWindowRect(hWnd, &windowRect)) {
+            return hitTestResult;
+        }
+
+        const int x = static_cast<int>(static_cast<short>(LOWORD(lParam)));
+        const int y = static_cast<int>(static_cast<short>(HIWORD(lParam)));
+        int activeInset = ::MulDiv(4, static_cast<int>(getDpiForWindow(hWnd)), 96);
+        if (activeInset < 3) {
+            activeInset = 3;
+        }
+
+        const bool rightActive = !containsRight || (x >= windowRect.right - activeInset);
+        const bool bottomActive = !containsBottom || (y >= windowRect.bottom - activeInset);
+
+        if (hitTestResult == HTRIGHT) {
+            return rightActive ? HTRIGHT : HTCLIENT;
+        }
+        if (hitTestResult == HTBOTTOM) {
+            return bottomActive ? HTBOTTOM : HTCLIENT;
+        }
+        if (hitTestResult == HTTOPRIGHT) {
+            return rightActive ? HTTOPRIGHT : HTTOP;
+        }
+        if (hitTestResult == HTBOTTOMLEFT) {
+            return bottomActive ? HTBOTTOMLEFT : HTLEFT;
+        }
+        if (hitTestResult == HTBOTTOMRIGHT) {
+            if (rightActive && bottomActive) {
+                return HTBOTTOMRIGHT;
+            }
+            if (rightActive) {
+                return HTRIGHT;
+            }
+            if (bottomActive) {
+                return HTBOTTOM;
+            }
+            return HTCLIENT;
+        }
+        return hitTestResult;
+    }
 
     static bool isValidWindow(HWND hWnd, bool checkVisible, bool checkTopLevel) {
         Q_ASSERT(hWnd);
@@ -1787,6 +1840,7 @@ namespace QWK {
                     // This will handle the left, right and bottom parts of the frame
                     // because we didn't change them.
                     LRESULT originalHitTestResult = ::DefWindowProcW(hWnd, WM_NCHITTEST, 0, lParam);
+                    originalHitTestResult = trimRightBottomResizeHitTest(hWnd, lParam, originalHitTestResult);
                     if (originalHitTestResult != HTCLIENT) {
                         // Even if the window is not resizable, we still can't return HTCLIENT here
                         // because when we enter this code path, it means the mouse cursor is

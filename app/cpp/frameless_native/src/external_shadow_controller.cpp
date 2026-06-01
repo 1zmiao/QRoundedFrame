@@ -448,6 +448,8 @@ void ExternalShadowController::hideNativeShadow(NativeShadowState &state) {
         ShowWindow(hwnd, SW_HIDE);
 #endif
     state.shown = false;
+    state.openingFadeScheduled = false;
+    state.openingOpacityScale = 1.0;
 }
 
 void ExternalShadowController::destroyNativeShadowState(NativeShadowState &state) {
@@ -620,7 +622,9 @@ void ExternalShadowController::updateNativeShadowBitmap(NativeShadowState &state
     }
 
     const bool firstVisiblePaint = !state.everShown && !state.shown && !state.inSizeMove && !state.sizing;
-    const qreal opacityScale = firstVisiblePaint ? 0.0 : 1.0;
+    if (firstVisiblePaint)
+        state.openingOpacityScale = 0.0;
+    const qreal opacityScale = (firstVisiblePaint || state.openingFadeScheduled) ? state.openingOpacityScale : 1.0;
 
     if (forceRepaint || sizeChanged || !state.shown) {
 
@@ -662,14 +666,8 @@ void ExternalShadowController::updateNativeShadowBitmap(NativeShadowState &state
     if (firstVisiblePaint && !state.openingFadeScheduled) {
         state.openingFadeScheduled = true;
         const WId targetId = reinterpret_cast<WId>(target);
-        QTimer::singleShot(200, this, [this, targetId]() {
-            auto it = m_nativeShadowByTarget.find(targetId);
-            if (it == m_nativeShadowByTarget.end())
-                return;
-            NativeShadowState &fadeState = it.value();
-            fadeState.openingFadeScheduled = false;
-            fadeState.everShown = true;
-            syncNativeRegisteredShadow(targetId, true, true);
+        QTimer::singleShot(16, this, [this, targetId]() {
+            advanceOpeningFade(targetId, 1);
         });
     } else if (!state.openingFadeScheduled) {
         state.everShown = true;
@@ -682,6 +680,43 @@ void ExternalShadowController::updateNativeShadowBitmap(NativeShadowState &state
 #endif
 }
 
+void ExternalShadowController::advanceOpeningFade(WId targetId, int step) {
+#ifdef Q_OS_WIN
+    auto it = m_nativeShadowByTarget.find(targetId);
+    if (it == m_nativeShadowByTarget.end())
+        return;
+
+    NativeShadowState &state = it.value();
+    if (!state.openingFadeScheduled)
+        return;
+    if (!shouldShowNativeShadow(state)) {
+        state.openingFadeScheduled = false;
+        state.openingOpacityScale = 1.0;
+        return;
+    }
+
+    static constexpr int kFadeFrames = 12;
+    static constexpr int kFadeFrameMs = 16;
+    const int clampedStep = qBound(1, step, kFadeFrames);
+    const qreal t = qreal(clampedStep) / qreal(kFadeFrames);
+    state.openingOpacityScale = t * t * (3.0 - 2.0 * t);
+    syncNativeRegisteredShadow(targetId, true, true);
+
+    if (clampedStep >= kFadeFrames) {
+        state.openingFadeScheduled = false;
+        state.openingOpacityScale = 1.0;
+        state.everShown = true;
+        return;
+    }
+
+    QTimer::singleShot(kFadeFrameMs, this, [this, targetId, clampedStep]() {
+        advanceOpeningFade(targetId, clampedStep + 1);
+    });
+#else
+    Q_UNUSED(targetId)
+    Q_UNUSED(step)
+#endif
+}
 void ExternalShadowController::applyShadowWindowStyles(QWindow *shadowWindow) const {
     if (!shadowWindow)
         return;

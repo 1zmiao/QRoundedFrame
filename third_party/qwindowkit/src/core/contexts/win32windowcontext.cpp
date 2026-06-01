@@ -348,7 +348,9 @@ namespace QWK {
         }
         return Win32WindowContext::Outside;
     }
-    static inline LRESULT trimRightBottomResizeHitTest(HWND hWnd, LPARAM lParam,
+    static inline LRESULT trimRightBottomResizeHitTest(const POINT &nativeLocalPos,
+                                                       int clientWidth,
+                                                       int clientHeight,
                                                        LRESULT hitTestResult) {
         const bool containsRight = (hitTestResult == HTRIGHT) ||
                                    (hitTestResult == HTTOPRIGHT) ||
@@ -359,21 +361,13 @@ namespace QWK {
         if (!containsRight && !containsBottom) {
             return hitTestResult;
         }
-
-        RECT windowRect{};
-        if (!::GetWindowRect(hWnd, &windowRect)) {
+        if (clientWidth <= 0 || clientHeight <= 0) {
             return hitTestResult;
         }
 
-        const int x = static_cast<int>(static_cast<short>(LOWORD(lParam)));
-        const int y = static_cast<int>(static_cast<short>(HIWORD(lParam)));
-        int activeInset = ::MulDiv(1, static_cast<int>(getDpiForWindow(hWnd)), 96);
-        if (activeInset < 1) {
-            activeInset = 1;
-        }
-
-        const bool rightActive = !containsRight || (x >= windowRect.right - activeInset);
-        const bool bottomActive = !containsBottom || (y >= windowRect.bottom - activeInset);
+        static constexpr int kVisibleEdgeInset = 1;
+        const bool rightActive = !containsRight || (nativeLocalPos.x >= clientWidth - kVisibleEdgeInset);
+        const bool bottomActive = !containsBottom || (nativeLocalPos.y >= clientHeight - kVisibleEdgeInset);
 
         if (hitTestResult == HTRIGHT) {
             return rightActive ? HTRIGHT : HTCLIENT;
@@ -1840,7 +1834,7 @@ namespace QWK {
                     // This will handle the left, right and bottom parts of the frame
                     // because we didn't change them.
                     LRESULT originalHitTestResult = ::DefWindowProcW(hWnd, WM_NCHITTEST, 0, lParam);
-                    originalHitTestResult = trimRightBottomResizeHitTest(hWnd, lParam, originalHitTestResult);
+                    originalHitTestResult = trimRightBottomResizeHitTest(nativeLocalPos, clientWidth, clientHeight, originalHitTestResult);
                     if (originalHitTestResult != HTCLIENT) {
                         // Even if the window is not resizable, we still can't return HTCLIENT here
                         // because when we enter this code path, it means the mouse cursor is

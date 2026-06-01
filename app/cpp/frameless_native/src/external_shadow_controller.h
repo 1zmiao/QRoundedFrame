@@ -48,6 +48,7 @@ private:
         bool sizing = false;
         bool everShown = false;
         bool openingFadeScheduled = false;
+        qreal openingOpacityScale = 1.0;
     };
 
     static QWindow *asWindow(QObject *object);
@@ -67,6 +68,7 @@ private:
     bool shouldShowNativeShadow(const NativeShadowState &state) const;
     QImage renderNativeShadowBitmap(const NativeShadowState &state, const QSize &size, int marginPx, int outerPaddingPx, int innerOverlapPx, qreal opacityScale = 1.0) const;
     void updateNativeShadowBitmap(NativeShadowState &state, const QRect &targetRect, bool stackBehind, bool forceRepaint);
+    void advanceOpeningFade(WId targetId, int step);
     static QRect nativeTargetRect(QWindow *window);
     static int dpiScaled(int value, QWindow *window);
 

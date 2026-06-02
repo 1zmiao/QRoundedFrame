@@ -24,14 +24,14 @@ Flickable {
     ScrollBar.vertical: ScrollBar {
         id: verticalScrollBar
         policy: ScrollBar.AsNeeded
-        width: Core.Theme.dp(12)
+        width: Core.Theme.dp(11)
         contentItem: Rectangle {
             implicitWidth: Core.Theme.dp(10)
             radius: width / 2
             opacity: (verticalScrollBar.active || verticalScrollBar.hovered || verticalScrollBar.pressed) ? 0.86 : 0
             color: verticalScrollBar.pressed ? Core.Theme.primaryPressed : (verticalScrollBar.hovered ? Core.Theme.primaryHover : Core.Theme.color.outline)
-            Behavior on opacity { NumberAnimation { duration: 340; easing.type: Easing.OutCubic } }
+            Behavior on opacity { NumberAnimation { duration: 500; easing.type: Easing.OutCubic } }
         }
-        background: Item { implicitWidth: Core.Theme.dp(12) }
+        background: Item { implicitWidth: Core.Theme.dp(11) }
     }
 }

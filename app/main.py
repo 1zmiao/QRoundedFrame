@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import sys
@@ -36,6 +36,10 @@ class QuickContextMenuFilter(QObject):
 def main() -> int:
     # Avoid stale compiled QML cache when users replace this template folder during development.
     os.environ.setdefault("QML_DISABLE_DISK_CACHE", "1")
+    # QWindowKit's DwmFlush flicker workaround can make Qt Quick content jump
+    # during Win10 upper-left live resize with D3D/RHI. Keep native resize owned
+    # by Windows/QWindowKit, but let Qt paint on its own frame cadence.
+    os.environ.setdefault("QWK_DISABLE_FLICKER_WORKAROUND", "1")
 
     # Improves the antialiasing quality of transparent rounded QML windows.
     fmt = QSurfaceFormat()

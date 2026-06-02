@@ -1,26 +1,27 @@
-# Native runtime prebuilt package
+# Native runtime prebuilt
 
-这个目录用于放置已经编译好的 `FramelessNative` Qt Quick 模块。运行程序的人不需要安装
-CMake、Visual Studio、GCC 或了解 C++。
+这个目录存放已经编译好的 `FramelessNative` Qt Quick 模块。普通运行用户不需要安装 CMake、Visual Studio、GCC，也不需要理解 C++。
 
-Python 启动时会按顺序查找：
-
-```text
-app/native/prebuilt/<platform>-<arch>-<py>-<qt>/qml
-app/native/prebuilt/<platform>-<machine>/qml
-app/native/prebuilt/current/qml
-```
-
-当前 Windows/Python 3.10/PySide6 6.11 的推荐目录名类似：
+当前仓库保留 Windows x64 / Python 3.10 / PySide6(Qt) 6.11 的两套预编译模块：
 
 ```text
-app/native/prebuilt/win32-x64-py310-qt6.11/
-  bin/
-  qml/
-    FramelessNative/
-      qmldir
-      FramelessNative.dll
+win32-x64-py310-qt6.11-system  # Windows 11 等可信系统圆角/阴影路径
+win32-x64-py310-qt6.11-custom  # Windows 10、虚拟机、Basic Display 等自定义圆角/阴影路径
 ```
 
-`bin/` 用于放置 QWindowKit 或本模块依赖的 DLL；`qml/` 会被加入 QML import path。
-如果没有匹配的预编译模块，程序会自动回退到旧的 Python 窗口实现。
+Python 启动时会由 `app/native/runtime.py` 根据 `app/window_policy.py` 的平台策略选择合适目录，并把其中的 `qml/` 加入 QML import path。
+
+运行必需文件包括：
+
+```text
+qmldir
+FramelessNative.dll
+FramelessNativeplugin.dll
+FramelessNative.qmltypes
+FramelessNative_qml_module_dir_map.qrc
+FramelessNative_qml_module_dir_map_rc.py
+```
+
+`.lib` 和 `.exp` 是链接产物，不是普通运行必需文件，仓库默认不保留。
+
+如果 Python、PySide6/Qt 版本、CPU 架构或平台不同，需要重新编译 native 模块。Windows 下使用项目根目录的 `b.bat`；Linux 请使用 `app/cpp/frameless_native/` 下的 CMake 工程自行构建。

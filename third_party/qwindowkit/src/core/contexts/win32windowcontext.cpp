@@ -69,6 +69,7 @@ namespace QWK {
     using WndProcHash = QHash<HWND, Win32WindowContext *>;
     Q_GLOBAL_STATIC(WndProcHash, g_wndProcHash)
 
+
     // Original Qt window proc function
     static WNDPROC g_qtWindowProc = nullptr;
 
@@ -366,8 +367,12 @@ namespace QWK {
         }
 
         static constexpr int kVisibleEdgeInset = 1;
-        const bool rightActive = !containsRight || (nativeLocalPos.x >= clientWidth - kVisibleEdgeInset);
-        const bool bottomActive = !containsBottom || (nativeLocalPos.y >= clientHeight - kVisibleEdgeInset);
+        static constexpr int kCornerVisibleEdgeInset = 10;
+        const bool isCorner = (hitTestResult == HTBOTTOMRIGHT);
+        const int rightInset = isCorner ? kCornerVisibleEdgeInset : kVisibleEdgeInset;
+        const int bottomInset = isCorner ? kCornerVisibleEdgeInset : kVisibleEdgeInset;
+        const bool rightActive = !containsRight || (nativeLocalPos.x >= clientWidth - rightInset);
+        const bool bottomActive = !containsBottom || (nativeLocalPos.y >= clientHeight - bottomInset);
 
         if (hitTestResult == HTRIGHT) {
             return rightActive ? HTRIGHT : HTCLIENT;
@@ -1630,39 +1635,39 @@ namespace QWK {
         Q_ASSERT(result);
         switch (message) {
             case WM_NCHITTEST: {
-                // 原生Win32窗口只有顶边是在窗口内部resize的，其余三边都是在窗口
-                // 外部进行resize的，其原理是，WS_THICKFRAME这个窗口样式会在窗
-                // 口的左、右和底边添加三个透明的resize区域，这三个区域在正常状态
-                // 下是完全不可见的，它们由DWM负责绘制和控制。这些区域的宽度等于
-                // (SM_CXSIZEFRAME + SM_CXPADDEDBORDER)，高度等于
-                // (SM_CYSIZEFRAME + SM_CXPADDEDBORDER)，在100%缩放时，均等
-                // 于8像素。它们属于窗口区域的一部分，但不属于客户区，而是属于非客
-                // 户区，因此GetWindowRect获取的区域中是包含这三个resize区域的，
-                // 而GetClientRect获取的区域是不包含它们的。当把
-                // DWMWA_EXTENDED_FRAME_BOUNDS作为参数调用
-                // DwmGetWindowAttribute时，也能获取到一个窗口大小，这个大小介
-                // 于前面两者之间，暂时不知道这个数据的意义及其作用。我们在
-                // WM_NCCALCSIZE消息的处理中，已经把整个窗口都设置为客户区了，也
-                // 就是说，我们的窗口已经没有非客户区了，因此那三个透明的resize区
-                // 域，此刻也已经成为窗口客户区的一部分了，从而变得不透明了。所以
-                // 现在的resize，看起来像是在窗口内部resize，是因为原本透明的地方
-                // 现在变得不透明了，实际上，单纯从范围上来看，现在我们resize的地方，
-                // 就是普通窗口的边框外部，那三个透明区域的范围。
-                // 因此，如果我们把边框完全去掉（就是我们正在做的事情），resize就
-                // 会看起来是在内部进行，这个问题通过常规方法非常难以解决。我测试过
-                // QQ和钉钉的窗口，它们的窗口就是在外部resize，但实际上它们是通过
-                // 把窗口实际的内容，嵌入到一个完全透明的但尺寸要大一圈的窗口中实现
-                // 的，虽然看起来效果还不错，但对于此项目而言，代码和窗口结构过于复
-                // 杂，因此我没有采用此方案。然而，对于具体的软件项目而言，其做法也
-                // 不失为一个优秀的解决方案，毕竟其在大多数条件下的表现都还可以。
+                // 鍘熺敓Win32绐楀彛鍙湁椤惰竟鏄湪绐楀彛鍐呴儴resize鐨勶紝鍏朵綑涓夎竟閮芥槸鍦ㄧ獥鍙?
+                // 澶栭儴杩涜resize鐨勶紝鍏跺師鐞嗘槸锛學S_THICKFRAME杩欎釜绐楀彛鏍峰紡浼氬湪绐?
+                // 鍙ｇ殑宸︺€佸彸鍜屽簳杈规坊鍔犱笁涓€忔槑鐨剅esize鍖哄煙锛岃繖涓変釜鍖哄煙鍦ㄦ甯哥姸鎬?
+                // 涓嬫槸瀹屽叏涓嶅彲瑙佺殑锛屽畠浠敱DWM璐熻矗缁樺埗鍜屾帶鍒躲€傝繖浜涘尯鍩熺殑瀹藉害绛変簬
+                // (SM_CXSIZEFRAME + SM_CXPADDEDBORDER)锛岄珮搴︾瓑浜?
+                // (SM_CYSIZEFRAME + SM_CXPADDEDBORDER)锛屽湪100%缂╂斁鏃讹紝鍧囩瓑
+                // 浜?鍍忕礌銆傚畠浠睘浜庣獥鍙ｅ尯鍩熺殑涓€閮ㄥ垎锛屼絾涓嶅睘浜庡鎴峰尯锛岃€屾槸灞炰簬闈炲
+                // 鎴峰尯锛屽洜姝etWindowRect鑾峰彇鐨勫尯鍩熶腑鏄寘鍚繖涓変釜resize鍖哄煙鐨勶紝
+                // 鑰孏etClientRect鑾峰彇鐨勫尯鍩熸槸涓嶅寘鍚畠浠殑銆傚綋鎶?
+                // DWMWA_EXTENDED_FRAME_BOUNDS浣滀负鍙傛暟璋冪敤
+                // DwmGetWindowAttribute鏃讹紝涔熻兘鑾峰彇鍒颁竴涓獥鍙ｅぇ灏忥紝杩欎釜澶у皬浠?
+                // 浜庡墠闈袱鑰呬箣闂达紝鏆傛椂涓嶇煡閬撹繖涓暟鎹殑鎰忎箟鍙婂叾浣滅敤銆傛垜浠湪
+                // WM_NCCALCSIZE娑堟伅鐨勫鐞嗕腑锛屽凡缁忔妸鏁翠釜绐楀彛閮借缃负瀹㈡埛鍖轰簡锛屼篃
+                // 灏辨槸璇达紝鎴戜滑鐨勭獥鍙ｅ凡缁忔病鏈夐潪瀹㈡埛鍖轰簡锛屽洜姝ら偅涓変釜閫忔槑鐨剅esize鍖?
+                // 鍩燂紝姝ゅ埢涔熷凡缁忔垚涓虹獥鍙ｅ鎴峰尯鐨勪竴閮ㄥ垎浜嗭紝浠庤€屽彉寰椾笉閫忔槑浜嗐€傛墍浠?
+                // 鐜板湪鐨剅esize锛岀湅璧锋潵鍍忔槸鍦ㄧ獥鍙ｅ唴閮╮esize锛屾槸鍥犱负鍘熸湰閫忔槑鐨勫湴鏂?
+                // 鐜板湪鍙樺緱涓嶉€忔槑浜嗭紝瀹為檯涓婏紝鍗曠函浠庤寖鍥翠笂鏉ョ湅锛岀幇鍦ㄦ垜浠瑀esize鐨勫湴鏂癸紝
+                // 灏辨槸鏅€氱獥鍙ｇ殑杈规澶栭儴锛岄偅涓変釜閫忔槑鍖哄煙鐨勮寖鍥淬€?
+                // 鍥犳锛屽鏋滄垜浠妸杈规瀹屽叏鍘绘帀锛堝氨鏄垜浠鍦ㄥ仛鐨勪簨鎯咃級锛宺esize灏?
+                // 浼氱湅璧锋潵鏄湪鍐呴儴杩涜锛岃繖涓棶棰橀€氳繃甯歌鏂规硶闈炲父闅句互瑙ｅ喅銆傛垜娴嬭瘯杩?
+                // QQ鍜岄拤閽夌殑绐楀彛锛屽畠浠殑绐楀彛灏辨槸鍦ㄥ閮╮esize锛屼絾瀹為檯涓婂畠浠槸閫氳繃
+                // 鎶婄獥鍙ｅ疄闄呯殑鍐呭锛屽祵鍏ュ埌涓€涓畬鍏ㄩ€忔槑鐨勪絾灏哄瑕佸ぇ涓€鍦堢殑绐楀彛涓疄鐜?
+                // 鐨勶紝铏界劧鐪嬭捣鏉ユ晥鏋滆繕涓嶉敊锛屼絾瀵逛簬姝ら」鐩€岃█锛屼唬鐮佸拰绐楀彛缁撴瀯杩囦簬澶?
+                // 鏉傦紝鍥犳鎴戞病鏈夐噰鐢ㄦ鏂规銆傜劧鑰岋紝瀵逛簬鍏蜂綋鐨勮蒋浠堕」鐩€岃█锛屽叾鍋氭硶涔?
+                // 涓嶅け涓轰竴涓紭绉€鐨勮В鍐虫柟妗堬紝姣曠珶鍏跺湪澶у鏁版潯浠朵笅鐨勮〃鐜伴兘杩樺彲浠ャ€?
                 //
-                // 和1.x的做法不同，现在的2.x选择了保留窗口三边，去除整个窗口顶部，
-                // 好处是保留了系统的原生边框，外观较好，且与系统结合紧密，而且resize
-                // 的表现也有很大改善，缺点是需要自行绘制顶部边框线。原本以为只能像
-                // Windows Terminal那样在WM_PAINT里搞黑魔法，但后来发现，其实只
-                // 要颜色相近，我们自行绘制一根实线也几乎能以假乱真，而且这样也不会
-                // 破坏Qt自己的绘制系统，能做到不依赖黑魔法就能实现像Windows Terminal
-                // 那样外观和功能都比较完美的自定义边框。
+                // 鍜?.x鐨勫仛娉曚笉鍚岋紝鐜板湪鐨?.x閫夋嫨浜嗕繚鐣欑獥鍙ｄ笁杈癸紝鍘婚櫎鏁翠釜绐楀彛椤堕儴锛?
+                // 濂藉鏄繚鐣欎簡绯荤粺鐨勫師鐢熻竟妗嗭紝澶栬杈冨ソ锛屼笖涓庣郴缁熺粨鍚堢揣瀵嗭紝鑰屼笖resize
+                // 鐨勮〃鐜颁篃鏈夊緢澶ф敼鍠勶紝缂虹偣鏄渶瑕佽嚜琛岀粯鍒堕《閮ㄨ竟妗嗙嚎銆傚師鏈互涓哄彧鑳藉儚
+                // Windows Terminal閭ｆ牱鍦╓M_PAINT閲屾悶榛戦瓟娉曪紝浣嗗悗鏉ュ彂鐜帮紝鍏跺疄鍙?
+                // 瑕侀鑹茬浉杩戯紝鎴戜滑鑷缁樺埗涓€鏍瑰疄绾夸篃鍑犱箮鑳戒互鍋囦贡鐪燂紝鑰屼笖杩欐牱涔熶笉浼?
+                // 鐮村潖Qt鑷繁鐨勭粯鍒剁郴缁燂紝鑳藉仛鍒颁笉渚濊禆榛戦瓟娉曞氨鑳藉疄鐜板儚Windows Terminal
+                // 閭ｆ牱澶栬鍜屽姛鑳介兘姣旇緝瀹岀編鐨勮嚜瀹氫箟杈规銆?
 
                 // A normal Win32 window can be resized outside of it. Here is the
                 // reason: the WS_THICKFRAME window style will cause a window has three
@@ -1733,6 +1738,7 @@ namespace QWK {
                 // pixels. Those edges sit next to scrollbars and controls in this
                 // template, so only the actual visible edge should resize.
                 static constexpr int kRightBottomVisibleEdgeInset = 4;
+                static constexpr int kCornerVisibleEdgeInset = kRightBottomVisibleEdgeInset + 6;
 
                 bool isFixedWidth = isHostWidthFixed();
                 bool isFixedHeight = isHostHeightFixed();
@@ -1741,6 +1747,8 @@ namespace QWK {
                 bool isInTopBorder = nativeLocalPos.y <= frameSize;
                 bool isInRightBorder = nativeLocalPos.x >= clientWidth - kRightBottomVisibleEdgeInset;
                 bool isInBottomBorder = nativeLocalPos.y >= clientHeight - kRightBottomVisibleEdgeInset;
+                bool isInRightCornerBorder = nativeLocalPos.x >= clientWidth - kCornerVisibleEdgeInset;
+                bool isInBottomCornerBorder = nativeLocalPos.y >= clientHeight - kCornerVisibleEdgeInset;
                 bool isInTitleBar = isInTitleBarDraggableArea(qtScenePos);
                 WindowAgentBase::SystemButton sysButtonType = WindowAgentBase::Unknown;
                 bool isInCaptionButtons = isInSystemButtons(qtScenePos, &sysButtonType);
@@ -1952,7 +1960,7 @@ namespace QWK {
                             } else {
                                 *result = HTRIGHT;
                             }
-                        } else if (isInRightBorder && isInBottomBorder) {
+                        } else if (isInRightCornerBorder && isInBottomCornerBorder) {
                             if (isFixedWidth) {
                                 *result = HTBOTTOM;
                             } else {
@@ -1993,12 +2001,12 @@ namespace QWK {
                             *result = HTTOP;
                             return true;
                         }
-                        if (isInBottomBorder) {
+                        if (isInBottomBorder || (isInBottomCornerBorder && isInRightCornerBorder)) {
                             if (isInLeftBorder) {
                                 *result = HTBOTTOMLEFT;
                                 return true;
                             }
-                            if (isInRightBorder) {
+                            if (isInRightCornerBorder && isInBottomCornerBorder) {
                                 *result = HTBOTTOMRIGHT;
                                 return true;
                             }
@@ -2022,6 +2030,7 @@ namespace QWK {
                     return true;
                 }
             }
+
 
             case WM_WINDOWPOSCHANGING: {
                 // ### FIXME: How does this problem happen and why is it solved?
@@ -2079,7 +2088,7 @@ namespace QWK {
                     return true;
                 }
                 case WM_NCPAINT: {
-                    // 边框阴影处于非客户区的范围，因此如果直接阻止非客户区的绘制，会导致边框阴影丢失
+                    // 杈规闃村奖澶勪簬闈炲鎴峰尯鐨勮寖鍥达紝鍥犳濡傛灉鐩存帴闃绘闈炲鎴峰尯鐨勭粯鍒讹紝浼氬鑷磋竟妗嗛槾褰变涪澶?
 
                     if (!isDwmCompositionEnabled()) {
                         // Only block WM_NCPAINT when DWM composition is disabled. If
@@ -2135,38 +2144,38 @@ namespace QWK {
         Q_UNUSED(message)
         Q_UNUSED(this)
 
-        // Windows是根据这个消息的返回值来设置窗口的客户区（窗口中真正显示的内容）
-        // 和非客户区（标题栏、窗口边框、菜单栏和状态栏等Windows系统自行提供的部分
-        // ，不过对于Qt来说，除了标题栏和窗口边框，非客户区基本也都是自绘的）的范
-        // 围的，lParam里存放的就是新客户区的几何区域，默认是整个窗口的大小，正常
-        // 的程序需要修改这个参数，告知系统窗口的客户区和非客户区的范围（一般来说可
-        // 以完全交给Windows，让其自行处理，使用默认的客户区和非客户区），因此如果
-        // 我们不修改lParam，就可以使客户区充满整个窗口，从而去掉标题栏和窗口边框
-        // （因为这些东西都被客户区给盖住了。但边框阴影也会因此而丢失，不过我们会使
-        // 用其他方式将其带回，请参考其他消息的处理，此处不过多提及）。但有个情况要
-        // 特别注意，那就是窗口最大化后，窗口的实际尺寸会比屏幕的尺寸大一点，从而使
-        // 用户看不到窗口的边界，这样用户就不能在窗口最大化后调整窗口的大小了（虽然
-        // 这个做法听起来特别奇怪，但Windows确实就是这样做的），因此如果我们要自行
-        // 处理窗口的非客户区，就要在窗口最大化后，将窗口边框的宽度和高度（一般是相
-        // 等的）从客户区裁剪掉，否则我们窗口所显示的内容就会超出屏幕边界，显示不全。
-        // 如果用户开启了任务栏自动隐藏，在窗口最大化后，还要考虑任务栏的位置。因为
-        // 如果窗口最大化后，其尺寸和屏幕尺寸相等（因为任务栏隐藏了，所以窗口最大化
-        // 后其实是充满了整个屏幕，变相的全屏了），Windows会认为窗口已经进入全屏的
-        // 状态，从而导致自动隐藏的任务栏无法弹出。要避免这个状况，就要使窗口的尺寸
-        // 小于屏幕尺寸。我下面的做法参考了火狐、Chromium和Windows Terminal
-        // 如果没有开启任务栏自动隐藏，是不存在这个问题的，所以要先进行判断。
-        // 一般情况下，*result设置为0（相当于DefWindowProc的返回值为0）就可以了，
-        // 根据MSDN的说法，返回0意为此消息已经被程序自行处理了，让Windows跳过此消
-        // 息，否则Windows会添加对此消息的默认处理，对于当前这个消息而言，就意味着
-        // 标题栏和窗口边框又会回来，这当然不是我们想要的结果。根据MSDN，当wParam
-        // 为FALSE时，只能返回0，但当其为TRUE时，可以返回0，也可以返回一个WVR_常
-        // 量。根据Chromium的注释，当存在非客户区时，如果返回WVR_REDRAW会导致子
-        // 窗口/子控件出现奇怪的bug（自绘控件错位），并且Lucas在Windows 10
-        // 上成功复现，说明这个bug至今都没有解决。我查阅了大量资料，发现唯一的解决
-        // 方案就是返回0。但如果不存在非客户区，且wParam为TRUE，最好返回
-        // WVR_REDRAW，否则窗口在调整大小可能会产生严重的闪烁现象。
-        // 虽然对大多数消息来说，返回0都代表让Windows忽略此消息，但实际上不同消息
-        // 能接受的返回值是不一样的，请注意自行查阅MSDN。
+        // Windows鏄牴鎹繖涓秷鎭殑杩斿洖鍊兼潵璁剧疆绐楀彛鐨勫鎴峰尯锛堢獥鍙ｄ腑鐪熸鏄剧ず鐨勫唴瀹癸級
+        // 鍜岄潪瀹㈡埛鍖猴紙鏍囬鏍忋€佺獥鍙ｈ竟妗嗐€佽彍鍗曟爮鍜岀姸鎬佹爮绛塛indows绯荤粺鑷鎻愪緵鐨勯儴鍒?
+        // 锛屼笉杩囧浜嶲t鏉ヨ锛岄櫎浜嗘爣棰樻爮鍜岀獥鍙ｈ竟妗嗭紝闈炲鎴峰尯鍩烘湰涔熼兘鏄嚜缁樼殑锛夌殑鑼?
+        // 鍥寸殑锛宭Param閲屽瓨鏀剧殑灏辨槸鏂板鎴峰尯鐨勫嚑浣曞尯鍩燂紝榛樿鏄暣涓獥鍙ｇ殑澶у皬锛屾甯?
+        // 鐨勭▼搴忛渶瑕佷慨鏀硅繖涓弬鏁帮紝鍛婄煡绯荤粺绐楀彛鐨勫鎴峰尯鍜岄潪瀹㈡埛鍖虹殑鑼冨洿锛堜竴鑸潵璇村彲
+        // 浠ュ畬鍏ㄤ氦缁橶indows锛岃鍏惰嚜琛屽鐞嗭紝浣跨敤榛樿鐨勫鎴峰尯鍜岄潪瀹㈡埛鍖猴級锛屽洜姝ゅ鏋?
+        // 鎴戜滑涓嶄慨鏀筶Param锛屽氨鍙互浣垮鎴峰尯鍏呮弧鏁翠釜绐楀彛锛屼粠鑰屽幓鎺夋爣棰樻爮鍜岀獥鍙ｈ竟妗?
+        // 锛堝洜涓鸿繖浜涗笢瑗块兘琚鎴峰尯缁欑洊浣忎簡銆備絾杈规闃村奖涔熶細鍥犳鑰屼涪澶憋紝涓嶈繃鎴戜滑浼氫娇
+        // 鐢ㄥ叾浠栨柟寮忓皢鍏跺甫鍥烇紝璇峰弬鑰冨叾浠栨秷鎭殑澶勭悊锛屾澶勪笉杩囧鎻愬強锛夈€備絾鏈変釜鎯呭喌瑕?
+        // 鐗瑰埆娉ㄦ剰锛岄偅灏辨槸绐楀彛鏈€澶у寲鍚庯紝绐楀彛鐨勫疄闄呭昂瀵镐細姣斿睆骞曠殑灏哄澶т竴鐐癸紝浠庤€屼娇
+        // 鐢ㄦ埛鐪嬩笉鍒扮獥鍙ｇ殑杈圭晫锛岃繖鏍风敤鎴峰氨涓嶈兘鍦ㄧ獥鍙ｆ渶澶у寲鍚庤皟鏁寸獥鍙ｇ殑澶у皬浜嗭紙铏界劧
+        // 杩欎釜鍋氭硶鍚捣鏉ョ壒鍒鎬紝浣哤indows纭疄灏辨槸杩欐牱鍋氱殑锛夛紝鍥犳濡傛灉鎴戜滑瑕佽嚜琛?
+        // 澶勭悊绐楀彛鐨勯潪瀹㈡埛鍖猴紝灏辫鍦ㄧ獥鍙ｆ渶澶у寲鍚庯紝灏嗙獥鍙ｈ竟妗嗙殑瀹藉害鍜岄珮搴︼紙涓€鑸槸鐩?
+        // 绛夌殑锛変粠瀹㈡埛鍖鸿鍓帀锛屽惁鍒欐垜浠獥鍙ｆ墍鏄剧ず鐨勫唴瀹瑰氨浼氳秴鍑哄睆骞曡竟鐣岋紝鏄剧ず涓嶅叏銆?
+        // 濡傛灉鐢ㄦ埛寮€鍚簡浠诲姟鏍忚嚜鍔ㄩ殣钘忥紝鍦ㄧ獥鍙ｆ渶澶у寲鍚庯紝杩樿鑰冭檻浠诲姟鏍忕殑浣嶇疆銆傚洜涓?
+        // 濡傛灉绐楀彛鏈€澶у寲鍚庯紝鍏跺昂瀵稿拰灞忓箷灏哄鐩哥瓑锛堝洜涓轰换鍔℃爮闅愯棌浜嗭紝鎵€浠ョ獥鍙ｆ渶澶у寲
+        // 鍚庡叾瀹炴槸鍏呮弧浜嗘暣涓睆骞曪紝鍙樼浉鐨勫叏灞忎簡锛夛紝Windows浼氳涓虹獥鍙ｅ凡缁忚繘鍏ュ叏灞忕殑
+        // 鐘舵€侊紝浠庤€屽鑷磋嚜鍔ㄩ殣钘忕殑浠诲姟鏍忔棤娉曞脊鍑恒€傝閬垮厤杩欎釜鐘跺喌锛屽氨瑕佷娇绐楀彛鐨勫昂瀵?
+        // 灏忎簬灞忓箷灏哄銆傛垜涓嬮潰鐨勫仛娉曞弬鑰冧簡鐏嫄銆丆hromium鍜學indows Terminal
+        // 濡傛灉娌℃湁寮€鍚换鍔℃爮鑷姩闅愯棌锛屾槸涓嶅瓨鍦ㄨ繖涓棶棰樼殑锛屾墍浠ヨ鍏堣繘琛屽垽鏂€?
+        // 涓€鑸儏鍐典笅锛?result璁剧疆涓?锛堢浉褰撲簬DefWindowProc鐨勮繑鍥炲€间负0锛夊氨鍙互浜嗭紝
+        // 鏍规嵁MSDN鐨勮娉曪紝杩斿洖0鎰忎负姝ゆ秷鎭凡缁忚绋嬪簭鑷澶勭悊浜嗭紝璁￤indows璺宠繃姝ゆ秷
+        // 鎭紝鍚﹀垯Windows浼氭坊鍔犲姝ゆ秷鎭殑榛樿澶勭悊锛屽浜庡綋鍓嶈繖涓秷鎭€岃█锛屽氨鎰忓懗鐫€
+        // 鏍囬鏍忓拰绐楀彛杈规鍙堜細鍥炴潵锛岃繖褰撶劧涓嶆槸鎴戜滑鎯宠鐨勭粨鏋溿€傛牴鎹甅SDN锛屽綋wParam
+        // 涓篎ALSE鏃讹紝鍙兘杩斿洖0锛屼絾褰撳叾涓篢RUE鏃讹紝鍙互杩斿洖0锛屼篃鍙互杩斿洖涓€涓猈VR_甯?
+        // 閲忋€傛牴鎹瓹hromium鐨勬敞閲婏紝褰撳瓨鍦ㄩ潪瀹㈡埛鍖烘椂锛屽鏋滆繑鍥濿VR_REDRAW浼氬鑷村瓙
+        // 绐楀彛/瀛愭帶浠跺嚭鐜板鎬殑bug锛堣嚜缁樻帶浠堕敊浣嶏級锛屽苟涓擫ucas鍦╓indows 10
+        // 涓婃垚鍔熷鐜帮紝璇存槑杩欎釜bug鑷充粖閮芥病鏈夎В鍐炽€傛垜鏌ラ槄浜嗗ぇ閲忚祫鏂欙紝鍙戠幇鍞竴鐨勮В鍐?
+        // 鏂规灏辨槸杩斿洖0銆備絾濡傛灉涓嶅瓨鍦ㄩ潪瀹㈡埛鍖猴紝涓攚Param涓篢RUE锛屾渶濂借繑鍥?
+        // WVR_REDRAW锛屽惁鍒欑獥鍙ｅ湪璋冩暣澶у皬鍙兘浼氫骇鐢熶弗閲嶇殑闂儊鐜拌薄銆?
+        // 铏界劧瀵瑰ぇ澶氭暟娑堟伅鏉ヨ锛岃繑鍥?閮戒唬琛ㄨWindows蹇界暐姝ゆ秷鎭紝浣嗗疄闄呬笂涓嶅悓娑堟伅
+        // 鑳芥帴鍙楃殑杩斿洖鍊兼槸涓嶄竴鏍风殑锛岃娉ㄦ剰鑷鏌ラ槄MSDN銆?
 
         // Sent when the size and position of a window's client area must be
         // calculated. By processing this message, an application can

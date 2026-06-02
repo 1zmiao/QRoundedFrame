@@ -52,7 +52,7 @@ QtObject {
     property color primaryContainerStrong: mix(baseCard, primary, mode === "dark" ? 0.46 : 0.20)
 
     property QtObject radius: QtObject {
-        property int window: 9
+        property int window: 8
         property int button: Math.max(5, theme.dp(6))
         property int popup: Math.max(8, theme.dp(10))
         property int card: Math.max(10, theme.dp(12))

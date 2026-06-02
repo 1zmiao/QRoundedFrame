@@ -1,4 +1,4 @@
-﻿# Python / Qt runtime caches
+# Python / Qt runtime caches
 __pycache__/
 *.py[cod]
 *.pyo
@@ -23,3 +23,9 @@ run_smoke.err
 .vscode/
 .DS_Store
 Thumbs.db
+# Native link-only artifacts; runtime uses DLL/qmldir/qmltypes/resource map
+app/native/prebuilt/**/*.lib
+app/native/prebuilt/**/*.exp
+
+# README screenshots are generated outside this source release unless explicitly added
+resources/readme/

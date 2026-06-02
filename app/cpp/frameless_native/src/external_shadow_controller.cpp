@@ -43,15 +43,14 @@ bool ensureNativeShadowClass() {
     return registered;
 }
 
-HBITMAP createDibFromImage(const QImage &source, void **bitsOut) {
-    if (source.isNull() || source.width() <= 0 || source.height() <= 0)
+HBITMAP createDibForSize(const QSize &size, void **bitsOut) {
+    if (!size.isValid() || size.width() <= 0 || size.height() <= 0)
         return nullptr;
 
-    QImage image = source.convertToFormat(QImage::Format_ARGB32_Premultiplied);
     BITMAPINFO bmi = {};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = image.width();
-    bmi.bmiHeader.biHeight = -image.height();
+    bmi.bmiHeader.biWidth = size.width();
+    bmi.bmiHeader.biHeight = -size.height();
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -63,13 +62,17 @@ HBITMAP createDibFromImage(const QImage &source, void **bitsOut) {
     if (!bitmap || !bits)
         return nullptr;
 
-    const int bytesPerLine = image.width() * 4;
-    for (int y = 0; y < image.height(); ++y) {
-        memcpy(static_cast<uchar *>(bits) + y * bytesPerLine, image.constScanLine(y), size_t(bytesPerLine));
-    }
     if (bitsOut)
         *bitsOut = bits;
     return bitmap;
+}
+
+bool sizingEdgeTouchesLeft(int edge) {
+    return edge == WMSZ_LEFT || edge == WMSZ_TOPLEFT || edge == WMSZ_BOTTOMLEFT;
+}
+
+bool sizingEdgeTouchesTop(int edge) {
+    return edge == WMSZ_TOP || edge == WMSZ_TOPLEFT || edge == WMSZ_TOPRIGHT;
 }
 }
 #endif
@@ -88,37 +91,36 @@ static int shadowBorderOnLine(const QImage &image, bool horizontal) {
     const int fixed = horizontal ? image.height() / 2 : image.width() / 2;
     constexpr int kVisibleAlpha = 2;
 
-    bool seenVisible = false;
-    int leftInner = 0;
+    int maxAlpha = 0;
     for (int i = 0; i < length; ++i) {
         const int alpha = horizontal ? alphaAt(image, i, fixed) : alphaAt(image, fixed, i);
-        if (alpha > kVisibleAlpha) {
-            seenVisible = true;
-            continue;
-        }
-        if (seenVisible) {
-            leftInner = i;
+        maxAlpha = qMax(maxAlpha, alpha);
+    }
+    if (maxAlpha <= kVisibleAlpha)
+        return 0;
+
+    const int solidThreshold = qMax(kVisibleAlpha + 1, int(qRound(qreal(maxAlpha) * 0.98)));
+    int leftSolid = -1;
+    for (int i = 0; i < length; ++i) {
+        const int alpha = horizontal ? alphaAt(image, i, fixed) : alphaAt(image, fixed, i);
+        if (alpha >= solidThreshold) {
+            leftSolid = i;
             break;
         }
     }
 
-    seenVisible = false;
-    int rightInner = 0;
+    int rightSolid = -1;
     for (int i = length - 1; i >= 0; --i) {
         const int alpha = horizontal ? alphaAt(image, i, fixed) : alphaAt(image, fixed, i);
-        if (alpha > kVisibleAlpha) {
-            seenVisible = true;
-            continue;
-        }
-        if (seenVisible) {
-            rightInner = length - 1 - i;
+        if (alpha >= solidThreshold) {
+            rightSolid = length - 1 - i;
             break;
         }
     }
 
-    if (leftInner <= 0 || rightInner <= 0 || leftInner + rightInner >= length)
+    if (leftSolid < 0 || rightSolid < 0 || leftSolid + rightSolid >= length)
         return 0;
-    return qMax(leftInner, rightInner);
+    return qMax(leftSolid, rightSolid) + 1;
 }
 
 static int naturalShadowSourceBorder(const QImage &source) {
@@ -246,6 +248,10 @@ bool ExternalShadowController::isSnapped(QObject *window) const {
         return false;
     if (target->visibility() == QWindow::Maximized || target->visibility() == QWindow::FullScreen)
         return false;
+    const WId targetId = target->winId();
+    const auto nativeIt = m_nativeShadowByTarget.constFind(targetId);
+    if (nativeIt != m_nativeShadowByTarget.constEnd() && (nativeIt.value().inSizeMove || nativeIt.value().sizing))
+        return false;
     const QRect rect = nativeWindowRect(target);
     const QRect area = nativeWorkAreaForRect(rect);
     return rectLooksSnapped(rect, area);
@@ -286,6 +292,7 @@ bool ExternalShadowController::nativeEventFilter(const QByteArray &eventType, vo
             if (it != m_nativeShadowByTarget.end()) {
                 it.value().inSizeMove = true;
                 it.value().sizing = false;
+                it.value().sizingEdge = 0;
             }
         }
         if (hasQmlShadow)
@@ -299,6 +306,14 @@ bool ExternalShadowController::nativeEventFilter(const QByteArray &eventType, vo
             if (it != m_nativeShadowByTarget.end()) {
                 it.value().inSizeMove = true;
                 it.value().sizing = true;
+                it.value().sizingEdge = static_cast<int>(msg->wParam);
+                RECT *resizeRect = reinterpret_cast<RECT *>(msg->lParam);
+                if (resizeRect) {
+                    const QRect targetRect(resizeRect->left, resizeRect->top,
+                                           resizeRect->right - resizeRect->left,
+                                           resizeRect->bottom - resizeRect->top);
+                    syncNativeRegisteredShadow(targetId, targetRect, true, false);
+                }
             }
         }
         break;
@@ -316,6 +331,7 @@ bool ExternalShadowController::nativeEventFilter(const QByteArray &eventType, vo
             if (it != m_nativeShadowByTarget.end()) {
                 it.value().inSizeMove = false;
                 it.value().sizing = false;
+                it.value().sizingEdge = 0;
             }
         }
         if (hasQmlShadow)
@@ -433,12 +449,26 @@ void ExternalShadowController::syncNativeRegisteredShadow(WId targetId, bool sta
     auto it = m_nativeShadowByTarget.find(targetId);
     if (it == m_nativeShadowByTarget.end())
         return;
+    syncNativeRegisteredShadow(targetId, nativeTargetRect(it.value().target), stackBehind, forceRepaint);
+}
+
+void ExternalShadowController::syncNativeRegisteredShadow(WId targetId, const QRect &targetRect, bool stackBehind, bool forceRepaint) {
+#ifdef Q_OS_WIN
+    auto it = m_nativeShadowByTarget.find(targetId);
+    if (it == m_nativeShadowByTarget.end())
+        return;
     NativeShadowState &state = it.value();
     if (!shouldShowNativeShadow(state)) {
         hideNativeShadow(state);
         return;
     }
-    updateNativeShadowBitmap(state, nativeTargetRect(state.target), stackBehind, forceRepaint);
+    updateNativeShadowBitmap(state, targetRect, stackBehind, forceRepaint);
+#else
+    Q_UNUSED(targetId)
+    Q_UNUSED(targetRect)
+    Q_UNUSED(stackBehind)
+    Q_UNUSED(forceRepaint)
+#endif
 }
 
 void ExternalShadowController::hideNativeShadow(NativeShadowState &state) {
@@ -458,6 +488,12 @@ void ExternalShadowController::destroyNativeShadowState(NativeShadowState &state
     if (hwnd && IsWindow(hwnd))
         DestroyWindow(hwnd);
 #endif
+    if (state.cachedBitmap) {
+        DeleteObject(reinterpret_cast<HBITMAP>(state.cachedBitmap));
+        state.cachedBitmap = 0;
+        state.cachedBitmapBits = nullptr;
+        state.cachedBitmapSize = QSize();
+    }
     state.shadowHwnd = 0;
     state.shown = false;
     state.lastBitmapSize = QSize();
@@ -488,6 +524,36 @@ bool ExternalShadowController::ensureNativeShadowWindow(NativeShadowState &state
 #endif
 }
 
+bool ExternalShadowController::ensureNativeShadowBitmap(NativeShadowState &state, const QSize &minimumSize) {
+#ifdef Q_OS_WIN
+    if (!minimumSize.isValid() || minimumSize.width() <= 0 || minimumSize.height() <= 0)
+        return false;
+    if (state.cachedBitmap && state.cachedBitmapBits
+        && state.cachedBitmapSize.width() >= minimumSize.width()
+        && state.cachedBitmapSize.height() >= minimumSize.height())
+        return true;
+
+    if (state.cachedBitmap) {
+        DeleteObject(reinterpret_cast<HBITMAP>(state.cachedBitmap));
+        state.cachedBitmap = 0;
+        state.cachedBitmapBits = nullptr;
+        state.cachedBitmapSize = QSize();
+    }
+
+    void *bits = nullptr;
+    HBITMAP bitmap = createDibForSize(minimumSize, &bits);
+    if (!bitmap || !bits)
+        return false;
+    state.cachedBitmap = reinterpret_cast<quintptr>(bitmap);
+    state.cachedBitmapBits = bits;
+    state.cachedBitmapSize = minimumSize;
+    return true;
+#else
+    Q_UNUSED(state)
+    Q_UNUSED(minimumSize)
+    return false;
+#endif
+}
 bool ExternalShadowController::loadNativeShadowAsset(NativeShadowState &state, const QUrl &assetUrl) {
     if (state.assetUrl == assetUrl && !state.source.isNull())
         return true;
@@ -537,7 +603,8 @@ QImage ExternalShadowController::renderNativeShadowBitmap(const NativeShadowStat
     if (!drawRect.isValid() || drawRect.width() <= 0 || drawRect.height() <= 0)
         return result;
 
-    const int overlap = qMax(0, qMin(innerOverlapPx, qMin(drawRect.width() / 4, drawRect.height() / 4)));
+    const int overlapLimit = qMin(drawRect.width() / 4, drawRect.height() / 4);
+    const int overlap = qMax(0, qMin(innerOverlapPx, overlapLimit));
     const int dstBorder = qMax(1, qMin(marginPx + overlap, qMin(drawRect.width() / 2, drawRect.height() / 2)));
     const int sw = source.width();
     const int sh = source.height();
@@ -554,7 +621,7 @@ QImage ExternalShadowController::renderNativeShadowBitmap(const NativeShadowStat
     const QRect sBottomLeft(0, sh - srcBorder, srcBorder, srcBorder);
     const QRect sBottom(srcBorder, sh - srcBorder, sw - srcBorder * 2, srcBorder);
     const QRect sBottomRight(sw - srcBorder, sh - srcBorder, srcBorder, srcBorder);
-
+    const QRect sCenter(srcBorder, srcBorder, sw - srcBorder * 2, sh - srcBorder * 2);
     const QRect dTopLeft(dx, dy, dstBorder, dstBorder);
     const QRect dTop(dx + dstBorder, dy, dw - dstBorder * 2, dstBorder);
     const QRect dTopRight(dx + dw - dstBorder, dy, dstBorder, dstBorder);
@@ -563,10 +630,13 @@ QImage ExternalShadowController::renderNativeShadowBitmap(const NativeShadowStat
     const QRect dBottomLeft(dx, dy + dh - dstBorder, dstBorder, dstBorder);
     const QRect dBottom(dx + dstBorder, dy + dh - dstBorder, dw - dstBorder * 2, dstBorder);
     const QRect dBottomRight(dx + dw - dstBorder, dy + dh - dstBorder, dstBorder, dstBorder);
+    const QRect dCenter(dx + dstBorder, dy + dstBorder, dw - dstBorder * 2, dh - dstBorder * 2);
 
     QPainter painter(&result);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
     painter.setOpacity(qBound<qreal>(0.0, state.opacity * opacityScale, 1.0));
+    if (dCenter.width() > 0 && dCenter.height() > 0 && sCenter.width() > 0 && sCenter.height() > 0)
+        painter.drawImage(dCenter, source, sCenter);
     painter.drawImage(dTopLeft, source, sTopLeft);
     if (dTop.width() > 0)
         painter.drawImage(dTop, source, sTop);
@@ -594,9 +664,10 @@ void ExternalShadowController::updateNativeShadowBitmap(NativeShadowState &state
 
     const int marginPx = dpiScaled(state.margin, state.target);
     const int guardPx = dpiScaled(qBound(6, state.margin / 3, 14), state.target);
-    const int innerOverlapPx = dpiScaled(qBound(8, state.margin / 2, 24), state.target);
+    const int innerOverlapDip = qBound(8, state.margin / 2, 24);
+    const int innerOverlapPx = dpiScaled(innerOverlapDip, state.target);
     const int outerPx = marginPx + guardPx;
-    const QRect shadowRect = targetRect.adjusted(-outerPx, -outerPx, outerPx, outerPx);
+    QRect shadowRect = targetRect.adjusted(-outerPx, -outerPx, outerPx, outerPx);
     const bool sizeChanged = state.lastBitmapSize != shadowRect.size();
     const LONG_PTR targetStyle = GetWindowLongPtrW(target, GWL_EXSTYLE);
     const LONG_PTR shadowStyle = GetWindowLongPtrW(shadow, GWL_EXSTYLE);
@@ -628,28 +699,35 @@ void ExternalShadowController::updateNativeShadowBitmap(NativeShadowState &state
 
     if (forceRepaint || sizeChanged || !state.shown) {
 
+        const int liveCacheSlackPx = (state.inSizeMove || state.sizing)
+                                     ? dpiScaled(qBound(96, state.margin * 3, 192), state.target)
+                                     : 0;
+        const QSize cacheSize(shadowRect.width() + liveCacheSlackPx, shadowRect.height() + liveCacheSlackPx);
+        if (!ensureNativeShadowBitmap(state, cacheSize)) {
+            hideNativeShadow(state);
+            return;
+        }
+
         const QImage bitmap = renderNativeShadowBitmap(state, shadowRect.size(), marginPx, guardPx, innerOverlapPx, opacityScale);
         if (bitmap.isNull()) {
             hideNativeShadow(state);
             return;
         }
-        void *bits = nullptr;
-        HBITMAP hBitmap = createDibFromImage(bitmap, &bits);
-        if (!hBitmap) {
-            hideNativeShadow(state);
-            return;
+
+        const int dstStride = state.cachedBitmapSize.width() * 4;
+        for (int y = 0; y < bitmap.height(); ++y) {
+            memcpy(static_cast<uchar *>(state.cachedBitmapBits) + y * dstStride, bitmap.constScanLine(y), size_t(bitmap.width() * 4));
         }
 
         HDC screenDc = GetDC(nullptr);
         HDC memDc = CreateCompatibleDC(screenDc);
-        HGDIOBJ oldBitmap = SelectObject(memDc, hBitmap);
+        HGDIOBJ oldBitmap = SelectObject(memDc, reinterpret_cast<HBITMAP>(state.cachedBitmap));
         POINT dst = { shadowRect.x(), shadowRect.y() };
         SIZE size = { shadowRect.width(), shadowRect.height() };
         POINT src = { 0, 0 };
         BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
         UpdateLayeredWindow(shadow, screenDc, &dst, &size, memDc, &src, 0, &blend, ULW_ALPHA);
         SelectObject(memDc, oldBitmap);
-        DeleteObject(hBitmap);
         DeleteDC(memDc);
         ReleaseDC(nullptr, screenDc);
         state.lastBitmapSize = shadowRect.size();

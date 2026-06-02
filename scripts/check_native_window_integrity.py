@@ -65,7 +65,8 @@ def check_native_agent() -> None:
         "CreateRoundRectRgn",
         "CreateRectRgn",
         "inwardBias",
-        "SetWindowRgn(hwnd, region, TRUE)",
+        "applyWindowRegion(false)",
+        "SetWindowRgn(hwnd, region, redrawRegion)",
         "SetWindowRgn(hwnd, nullptr",
     ]
     for needle in required:
@@ -91,7 +92,15 @@ def check_external_shadow() -> None:
         "stackShadowOnly",
         "outerPaddingPx",
         "innerOverlapPx",
+        "liveCacheSlackPx",
+        "ensureNativeShadowBitmap",
+        "cachedBitmapSize",
+        "sizingEdgeTouchesLeft",
+        "sizingEdgeTouchesTop",
+        "sizingEdge",
         "guardPx",
+        "renderNativeShadowBitmap(state, shadowRect.size(), marginPx, guardPx, innerOverlapPx, opacityScale)",
+        "painter.drawImage(dCenter, source, sCenter)",
         "showFlag",
     ]
     for needle in required:
@@ -104,6 +113,9 @@ def check_external_shadow() -> None:
         "qRgba(0, 0, 0, alpha)": "Do not procedurally generate a replacement shadow bitmap.",
         "hideNativeShadow(it.value())": "Do not hide the native shadow during WM_SIZING; it must stay visible while resizing.",
         "if (state.sizing)": "Do not suppress native shadow visibility while sizing.",
+        "innerGuardPx": "Do not draw extra center/guard overlays; the PNG asset owns all shadow pixels.",
+        "hiddenExtra": "Do not draw extra hidden guard strips behind the window; this creates hard seams and square intersections.",
+        "CompositionMode_Source": "Do not overwrite layered-window pixels with a procedural center fill.",
     }
     for needle, reason in forbidden.items():
         if needle in text:

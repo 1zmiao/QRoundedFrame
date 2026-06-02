@@ -39,6 +39,9 @@ private:
         QRect lastTargetRect;
         QRect lastShadowRect;
         QSize lastBitmapSize;
+        QSize cachedBitmapSize;
+        quintptr cachedBitmap = 0;
+        void *cachedBitmapBits = nullptr;
         int margin = 0;
         qreal opacity = 1.0;
         int cornerRadius = 0;
@@ -46,6 +49,7 @@ private:
         bool shown = false;
         bool inSizeMove = false;
         bool sizing = false;
+        int sizingEdge = 0;
         bool everShown = false;
         bool openingFadeScheduled = false;
         qreal openingOpacityScale = 1.0;
@@ -61,10 +65,12 @@ private:
     void syncShadow(QWindow *shadowWindow, QWindow *targetWindow, int shadowMargin, bool stackBehind);
     void stackShadow(QWindow *shadowWindow, QWindow *targetWindow) const;
     void syncNativeRegisteredShadow(WId targetId, bool stackBehind, bool forceRepaint = false);
+    void syncNativeRegisteredShadow(WId targetId, const QRect &targetRect, bool stackBehind, bool forceRepaint);
     void hideNativeShadow(NativeShadowState &state);
     void destroyNativeShadowState(NativeShadowState &state);
     bool ensureNativeShadowWindow(NativeShadowState &state);
     bool loadNativeShadowAsset(NativeShadowState &state, const QUrl &assetUrl);
+    bool ensureNativeShadowBitmap(NativeShadowState &state, const QSize &minimumSize);
     bool shouldShowNativeShadow(const NativeShadowState &state) const;
     QImage renderNativeShadowBitmap(const NativeShadowState &state, const QSize &size, int marginPx, int outerPaddingPx, int innerOverlapPx, qreal opacityScale = 1.0) const;
     void updateNativeShadowBitmap(NativeShadowState &state, const QRect &targetRect, bool stackBehind, bool forceRepaint);

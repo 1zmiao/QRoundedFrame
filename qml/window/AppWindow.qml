@@ -1,4 +1,4 @@
-﻿import QtQuick
+import QtQuick
 import QtQuick.Window
 import QtQuick.Controls
 import FramelessNative 1.0
@@ -58,7 +58,7 @@ Window {
             return Math.max(0, Math.min(1, Number(metrics["windowShadowOpacityDark"])))
         if (Core.Theme.mode !== "dark" && metrics && metrics["windowShadowOpacityLight"] !== undefined)
             return Math.max(0, Math.min(1, Number(metrics["windowShadowOpacityLight"])))
-        return Core.Theme.mode === "dark" ? 1.0 : 0.7
+        return Core.Theme.mode === "dark" ? 1.0 : 1.0
     }
     property int normalCornerRadius: Core.Theme.radius.window
     property int cornerRadius: (root.windowMaximized || root.snappedVisual || effectiveCornerPolicy === "square") ? 0 : normalCornerRadius

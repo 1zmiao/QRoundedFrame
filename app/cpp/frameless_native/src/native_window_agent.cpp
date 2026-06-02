@@ -109,7 +109,7 @@ bool NativeWindowAgent::eventFilter(QObject *watched, QEvent *event) {
             applyWindowAttributes();
             break;
         case QEvent::Resize:
-            applyWindowRegion();
+            applyWindowRegion(false);
             break;
         default:
             break;
@@ -177,7 +177,7 @@ void NativeWindowAgent::applyWindowAttributes() {
 #endif
 }
 
-void NativeWindowAgent::applyWindowRegion() {
+void NativeWindowAgent::applyWindowRegion(bool redraw) {
 #ifdef Q_OS_WIN
     if (!m_window)
         return;
@@ -214,7 +214,8 @@ void NativeWindowAgent::applyWindowRegion() {
                       : CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
     if (!region)
         return;
-    if (SetWindowRgn(hwnd, region, TRUE)) {
+    const BOOL redrawRegion = redraw ? TRUE : FALSE;
+    if (SetWindowRgn(hwnd, region, redrawRegion)) {
         m_lastRegionSize = size;
         m_lastRegionRadius = radius;
         return;

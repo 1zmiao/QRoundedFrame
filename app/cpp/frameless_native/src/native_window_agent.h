@@ -34,7 +34,7 @@ protected:
 private:
     static int systemButtonRole(const QString &role);
     void applyWindowAttributes();
-    void applyWindowRegion();
+    void applyWindowRegion(bool redraw = true);
     void clearWindowRegion();
 
     QPointer<QQuickWindow> m_window;

@@ -1,0 +1,2692 @@
+// Copyright (C) 2023-2024 Stdware Collections (https://www.github.com/stdware)
+// Copyright (C) 2021-2023 wangwenx190 (Yuhang Zhao)
+// SPDX-License-Identifier: Apache-2.0
+
+#include "win32windowcontext_p.h"
+
+#include <optional>
+
+#include <QtCore/QAbstractEventDispatcher>
+#include <QtCore/QDateTime>
+#include <QtCore/QHash>
+#include <QtCore/QScopeGuard>
+#include <QtCore/QTimer>
+#include <QtGui/QGuiApplication>
+#include <QtGui/QPainter>
+#include <QtGui/QPalette>
+
+#include <QtGui/qpa/qwindowsysteminterface.h>
+
+#include <QtGui/private/qhighdpiscaling_p.h>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#  include <QtGui/private/qguiapplication_p.h>
+#endif
+#include <QtGui/qpa/qplatformwindow.h>
+#if QT_VERSION < QT_VERSION_CHECK(6, 2, 0)
+#  include <QtGui/qpa/qplatformnativeinterface.h>
+#else
+#  include <QtGui/qpa/qplatformwindow_p.h>
+#endif
+
+#include <QWKCore/qwkconfig.h>
+
+#include "qwkglobal_p.h"
+#include "qwkwindowsextra_p.h"
+
+#include <shellapi.h>
+
+#if (QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)) && (QT_VERSION <= QT_VERSION_CHECK(6, 6, 1))
+#  error Current Qt version has a critical bug which will break QWK functionality. Please upgrade to > 6.6.1 or downgrade to < 6.6.0
+#endif
+
+#ifndef DWM_BB_ENABLE
+#  define DWM_BB_ENABLE 0x00000001
+#endif
+
+#ifndef ABM_GETAUTOHIDEBAREX
+#  define ABM_GETAUTOHIDEBAREX 0x0000000b
+#endif
+
+namespace QWK {
+
+    enum IconButtonClickLevelFlag {
+        IconButtonClicked       = 1 << 0,
+        IconButtonDoubleClicked = 1 << 1,
+        IconButtonTriggersClose = 1 << 2,
+    };
+
+    // The thickness of an auto-hide taskbar in pixels.
+    static constexpr const quint8 kAutoHideTaskBarThickness = 2;
+
+    QWK_USED static constexpr const struct {
+        const uint32_t activeLight = MAKE_RGBA_COLOR(110, 110, 110, 255);   // #6E6E6E
+        const uint32_t activeDark = MAKE_RGBA_COLOR(51, 51, 51, 255);       // #333333
+        const uint32_t inactiveLight = MAKE_RGBA_COLOR(167, 167, 167, 255); // #A7A7A7
+        const uint32_t inactiveDark = MAKE_RGBA_COLOR(61, 61, 62, 255);     // #3D3D3E
+    } kWindowsColorSet;
+
+    // hWnd -> context
+    using WndProcHash = QHash<HWND, Win32WindowContext *>;
+    Q_GLOBAL_STATIC(WndProcHash, g_wndProcHash)
+
+
+    // Original Qt window proc function
+    static WNDPROC g_qtWindowProc = nullptr;
+
+    static inline bool
+#if !QWINDOWKIT_CONFIG(ENABLE_WINDOWS_SYSTEM_BORDERS)
+        constexpr
+#endif
+
+        isSystemBorderEnabled() {
+        return
+#if QWINDOWKIT_CONFIG(ENABLE_WINDOWS_SYSTEM_BORDERS)
+            isWin10OrGreater()
+#else
+            false
+#endif
+                ;
+    }
+
+    static inline void triggerFrameChange(HWND hwnd) {
+        Q_ASSERT(hwnd);
+        ::SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                       SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
+                           SWP_FRAMECHANGED);
+    }
+
+    static void setInternalWindowFrameMargins(QWindow *window, const QMargins &margins) {
+        Q_ASSERT(window);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+        Q_UNUSED(window);
+        Q_UNUSED(margins);
+        // https://github.com/stdware/qwindowkit/issues/48
+        // We don't need this workaround anymore since Qt 6.7.0 or so.
+        // The accurate version can't be determined because it's fixed by a series
+        // of patches applied in different times. But according to my research
+        // 6.7.0 should contain most of them.
+#else // < 6.7.0
+        const QVariant marginsVar = QVariant::fromValue(margins);
+
+        // We need to tell Qt we have set a custom margin, because we are hiding
+        // the title bar by pretending the whole window is filled by client area,
+        // this however confuses Qt's internal logic. We need to do the following
+        // hack to let Qt consider the extra margin when changing window geometry.
+        window->setProperty("_q_windowsCustomMargins", marginsVar);
+#  if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+        if (QPlatformWindow *platformWindow = window->handle()) {
+            if (const auto ni = QGuiApplication::platformNativeInterface()) {
+                ni->setWindowProperty(platformWindow, QStringLiteral("WindowsCustomMargins"),
+                                      marginsVar);
+            }
+        }
+#  else  // >= 6.0.0
+        if (const auto platformWindow =
+                dynamic_cast<QNativeInterface::Private::QWindowsWindow *>(window->handle())) {
+            platformWindow->setCustomMargins(margins);
+        }
+#  endif // < 6.0.0
+#endif   // >= 6.7.0
+    }
+
+    static inline MONITORINFOEXW getMonitorForWindow(HWND hwnd) {
+        Q_ASSERT(hwnd);
+        // Use "MONITOR_DEFAULTTONEAREST" here so that we can still get the correct
+        // monitor even if the window is minimized.
+        HMONITOR monitor = ::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFOEXW monitorInfo{};
+        monitorInfo.cbSize = sizeof(monitorInfo);
+        ::GetMonitorInfoW(monitor, &monitorInfo);
+        return monitorInfo;
+    }
+
+    static inline void moveWindowToMonitor(HWND hwnd, const MONITORINFOEXW &activeMonitor) {
+        Q_ASSERT(hwnd);
+        RECT currentMonitorRect = getMonitorForWindow(hwnd).rcMonitor;
+        RECT activeMonitorRect = activeMonitor.rcMonitor;
+        // We are in the same monitor, nothing to adjust here.
+        if (currentMonitorRect == activeMonitorRect) {
+            return;
+        }
+        RECT currentWindowRect{};
+        ::GetWindowRect(hwnd, &currentWindowRect);
+        auto newWindowX =
+            activeMonitorRect.left + (currentWindowRect.left - currentMonitorRect.left);
+        auto newWindowY = activeMonitorRect.top + (currentWindowRect.top - currentMonitorRect.top);
+        ::SetWindowPos(hwnd, nullptr, newWindowX, newWindowY, RECT_WIDTH(currentWindowRect),
+                       RECT_HEIGHT(currentWindowRect),
+                       SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+    }
+
+    static inline bool isFullScreen(HWND hwnd) {
+        Q_ASSERT(hwnd);
+        RECT windowRect{};
+        ::GetWindowRect(hwnd, &windowRect);
+        // Compare to the full area of the screen, not the work area.
+        return (windowRect == getMonitorForWindow(hwnd).rcMonitor);
+    }
+
+    static inline bool isMaximized(HWND hwnd) {
+        Q_ASSERT(hwnd);
+        return ::IsZoomed(hwnd);
+    }
+
+    static inline bool isMinimized(HWND hwnd) {
+        Q_ASSERT(hwnd);
+        return ::IsIconic(hwnd);
+    }
+
+    static inline bool isWindowNoState(HWND hwnd) {
+        Q_ASSERT(hwnd);
+#if 0
+        WINDOWPLACEMENT wp{};
+        wp.length = sizeof(wp);
+        ::GetWindowPlacement(hwnd, &wp);
+        return ((wp.showCmd == SW_NORMAL) || (wp.showCmd == SW_RESTORE));
+#else
+        if (isFullScreen(hwnd)) {
+            return false;
+        }
+        const auto style = static_cast<DWORD>(::GetWindowLongPtrW(hwnd, GWL_STYLE));
+        return (!(style & (WS_MINIMIZE | WS_MAXIMIZE)));
+#endif
+    }
+
+    static inline void bringWindowToFront(HWND hwnd) {
+        Q_ASSERT(hwnd);
+        HWND oldForegroundWindow = ::GetForegroundWindow();
+        if (!oldForegroundWindow) {
+            // The foreground window can be NULL, it's not an API error.
+            return;
+        }
+        MONITORINFOEXW activeMonitor = getMonitorForWindow(oldForegroundWindow);
+        // We need to show the window first, otherwise we won't be able to bring it to front.
+        if (!::IsWindowVisible(hwnd)) {
+            ::ShowWindow(hwnd, SW_SHOW);
+        }
+        if (isMinimized(hwnd)) {
+            // Restore the window if it is minimized.
+            ::ShowWindow(hwnd, SW_RESTORE);
+            // Once we've been restored, throw us on the active monitor.
+            moveWindowToMonitor(hwnd, activeMonitor);
+            // When the window is restored, it will always become the foreground window.
+            // So return early here, we don't need the following code to bring it to front.
+            return;
+        }
+        // OK, our window is not minimized, so now we will try to bring it to front manually.
+        // First try to send a message to the current foreground window to check whether
+        // it is currently hanging or not.
+        if (!::SendMessageTimeoutW(oldForegroundWindow, WM_NULL, 0, 0,
+                                   SMTO_BLOCK | SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG, 1000,
+                                   nullptr)) {
+            // The foreground window hangs, can't activate current window.
+            return;
+        }
+        DWORD windowThreadProcessId = ::GetWindowThreadProcessId(oldForegroundWindow, nullptr);
+        DWORD currentThreadId = ::GetCurrentThreadId();
+        // We won't be able to change a window's Z order if it's not our own window,
+        // so we use this small technique to pretend the foreground window is ours.
+        ::AttachThreadInput(windowThreadProcessId, currentThreadId, TRUE);
+
+        [[maybe_unused]] const auto &cleaner =
+            qScopeGuard([windowThreadProcessId, currentThreadId]() {
+                ::AttachThreadInput(windowThreadProcessId, currentThreadId, FALSE);
+            });
+
+        ::BringWindowToTop(hwnd);
+        // Activate the window too. This will force us to the virtual desktop this
+        // window is on, if it's on another virtual desktop.
+        ::SetActiveWindow(hwnd);
+        // Throw us on the active monitor.
+        moveWindowToMonitor(hwnd, activeMonitor);
+    }
+
+    // Returns false if the menu is canceled
+    static bool showSystemMenu_sys(HWND hWnd, const POINT &pos, const bool selectFirstEntry,
+                                   const bool fixedSize) {
+        Q_ASSERT(hWnd);
+        HMENU hMenu = ::GetSystemMenu(hWnd, FALSE);
+        if (!hMenu) {
+            // The corresponding window doesn't have a system menu, most likely due to the
+            // lack of the "WS_SYSMENU" window style. This situation should not be treated
+            // as an error so just ignore it and return early.
+            return true;
+        }
+
+        const auto windowStyles = ::GetWindowLongPtrW(hWnd, GWL_STYLE);
+        const bool allowMaximize = windowStyles & WS_MAXIMIZEBOX;
+        const bool allowMinimize = windowStyles & WS_MINIMIZEBOX;
+
+        const bool maxOrFull = isMaximized(hWnd) || isFullScreen(hWnd);
+        ::EnableMenuItem(hMenu, SC_CLOSE, (MF_BYCOMMAND | MFS_ENABLED));
+        ::EnableMenuItem(
+            hMenu, SC_MAXIMIZE,
+            (MF_BYCOMMAND |
+             ((maxOrFull || fixedSize || !allowMaximize) ? MFS_DISABLED : MFS_ENABLED)));
+        ::EnableMenuItem(
+            hMenu, SC_RESTORE,
+            (MF_BYCOMMAND |
+             ((maxOrFull && !fixedSize && allowMaximize) ? MFS_ENABLED : MFS_DISABLED)));
+        // The first menu item should be selected by default if the menu is brought
+        // up by keyboard. I don't know how to pre-select a menu item but it seems
+        // highlight can do the job. However, there's an annoying issue if we do
+        // this manually: the highlighted menu item is really only highlighted,
+        // not selected, so even if the mouse cursor hovers on other menu items
+        // or the user navigates to other menu items through keyboard, the original
+        // highlight bar will not move accordingly, the OS will generate another
+        // highlight bar to indicate the current selected menu item, which will make
+        // the menu look kind of weird. Currently I don't know how to fix this issue.
+        ::HiliteMenuItem(hWnd, hMenu, SC_RESTORE,
+                         (MF_BYCOMMAND | (selectFirstEntry ? MFS_HILITE : MFS_UNHILITE)));
+        ::EnableMenuItem(hMenu, SC_MINIMIZE,
+                         (MF_BYCOMMAND | (allowMinimize ? MFS_ENABLED : MFS_DISABLED)));
+        ::EnableMenuItem(hMenu, SC_SIZE,
+                         (MF_BYCOMMAND | ((maxOrFull || fixedSize) ? MFS_DISABLED : MFS_ENABLED)));
+        ::EnableMenuItem(hMenu, SC_MOVE, (MF_BYCOMMAND | (maxOrFull ? MFS_DISABLED : MFS_ENABLED)));
+
+        // The default menu item will appear in bold font. There can only be one default
+        // menu item per menu at most. Set the item ID to "UINT_MAX" (or simply "-1")
+        // can clear the default item for the given menu.
+        UINT defaultItemId = UINT_MAX;
+        if (isWin11OrGreater()) {
+            if (maxOrFull) {
+                defaultItemId = SC_RESTORE;
+            } else {
+                defaultItemId = SC_MAXIMIZE;
+            }
+        }
+        if (defaultItemId == UINT_MAX) {
+            defaultItemId = SC_CLOSE;
+        }
+        ::SetMenuDefaultItem(hMenu, defaultItemId, FALSE);
+
+        // Popup the system menu at the required position.
+        const auto result = ::TrackPopupMenu(
+            hMenu,
+            (TPM_RETURNCMD | (QGuiApplication::isRightToLeft() ? TPM_RIGHTALIGN : TPM_LEFTALIGN) |
+             TPM_RIGHTBUTTON),
+            pos.x, pos.y, 0, hWnd, nullptr);
+
+        // Unhighlight the first menu item after the popup menu is closed, otherwise it will keep
+        // highlighting until we unhighlight it manually.
+        ::HiliteMenuItem(hWnd, hMenu, SC_RESTORE, (MF_BYCOMMAND | MFS_UNHILITE));
+
+        if (!result) {
+            // The user canceled the menu, no need to continue.
+            return false;
+        }
+
+        // Send the command that the user chooses to the corresponding window.
+        ::PostMessageW(hWnd, WM_SYSCOMMAND, result, 0);
+        return true;
+    }
+
+    static inline constexpr Win32WindowContext::WindowPart getHitWindowPart(int hitTestResult) {
+        switch (hitTestResult) {
+            case HTCLIENT:
+                return Win32WindowContext::ClientArea;
+            case HTCAPTION:
+                return Win32WindowContext::TitleBar;
+            case HTSYSMENU:
+            case HTHELP:
+            case HTREDUCE:
+            case HTZOOM:
+            case HTCLOSE:
+                return Win32WindowContext::ChromeButton;
+            case HTLEFT:
+            case HTRIGHT:
+            case HTTOP:
+            case HTTOPLEFT:
+            case HTTOPRIGHT:
+            case HTBOTTOM:
+            case HTBOTTOMLEFT:
+            case HTBOTTOMRIGHT:
+                return Win32WindowContext::ResizeBorder;
+            case HTBORDER:
+                return Win32WindowContext::FixedBorder;
+            default:
+                break;
+        }
+        return Win32WindowContext::Outside;
+    }
+    static inline LRESULT trimmedInactiveHitTest(const POINT &nativeLocalPos,
+                                                 int clientWidth,
+                                                 int clientHeight) {
+        if ((nativeLocalPos.x < 0) || (nativeLocalPos.y < 0) ||
+            (nativeLocalPos.x > clientWidth) || (nativeLocalPos.y > clientHeight)) {
+            return HTNOWHERE;
+        }
+        return HTCLIENT;
+    }
+
+    static inline LRESULT trimResizeHitTest(const POINT &nativeWindowPos,
+                                            int windowWidth,
+                                            int windowHeight,
+                                            LRESULT hitTestResult,
+                                            int edgeInset,
+                                            int cornerInset) {
+        const bool containsLeft = (hitTestResult == HTLEFT) ||
+                                  (hitTestResult == HTTOPLEFT) ||
+                                  (hitTestResult == HTBOTTOMLEFT);
+        const bool containsTop = (hitTestResult == HTTOP) ||
+                                 (hitTestResult == HTTOPLEFT) ||
+                                 (hitTestResult == HTTOPRIGHT);
+        const bool containsRight = (hitTestResult == HTRIGHT) ||
+                                   (hitTestResult == HTTOPRIGHT) ||
+                                   (hitTestResult == HTBOTTOMRIGHT);
+        const bool containsBottom = (hitTestResult == HTBOTTOM) ||
+                                    (hitTestResult == HTBOTTOMLEFT) ||
+                                    (hitTestResult == HTBOTTOMRIGHT);
+        if (!containsLeft && !containsTop && !containsRight && !containsBottom) {
+            return hitTestResult;
+        }
+        if (windowWidth <= 0 || windowHeight <= 0) {
+            return hitTestResult;
+        }
+
+        const bool isCorner = (hitTestResult == HTTOPLEFT) ||
+                              (hitTestResult == HTTOPRIGHT) ||
+                              (hitTestResult == HTBOTTOMLEFT) ||
+                              (hitTestResult == HTBOTTOMRIGHT);
+        const int inset = qBound(1, isCorner ? cornerInset : edgeInset, 64);
+        const bool leftActive = !containsLeft ||
+                                ((nativeWindowPos.x >= 0) && (nativeWindowPos.x <= inset));
+        const bool topActive = !containsTop ||
+                               ((nativeWindowPos.y >= 0) && (nativeWindowPos.y <= inset));
+        const int trailingCompensation = isCorner ? 2 : 1;
+        const bool rightActive = !containsRight ||
+                                 ((nativeWindowPos.x >= windowWidth - inset - trailingCompensation) &&
+                                  (nativeWindowPos.x <= windowWidth));
+        const bool bottomActive = !containsBottom ||
+                                  ((nativeWindowPos.y >= windowHeight - inset - trailingCompensation) &&
+                                   (nativeWindowPos.y <= windowHeight));
+
+        if (hitTestResult == HTLEFT) {
+            return leftActive ? HTLEFT : HTCLIENT;
+        }
+        if (hitTestResult == HTTOP) {
+            return topActive ? HTTOP : HTCLIENT;
+        }
+        if (hitTestResult == HTRIGHT) {
+            return rightActive ? HTRIGHT : HTCLIENT;
+        }
+        if (hitTestResult == HTBOTTOM) {
+            return bottomActive ? HTBOTTOM : HTCLIENT;
+        }
+        if (hitTestResult == HTTOPLEFT) {
+            if (topActive && leftActive) {
+                return HTTOPLEFT;
+            }
+            if (topActive) {
+                return HTTOP;
+            }
+            if (leftActive) {
+                return HTLEFT;
+            }
+            return HTCLIENT;
+        }
+        if (hitTestResult == HTTOPRIGHT) {
+            if (topActive && rightActive) {
+                return HTTOPRIGHT;
+            }
+            if (topActive) {
+                return HTTOP;
+            }
+            if (rightActive) {
+                return HTRIGHT;
+            }
+            return HTCLIENT;
+        }
+        if (hitTestResult == HTBOTTOMLEFT) {
+            if (bottomActive && leftActive) {
+                return HTBOTTOMLEFT;
+            }
+            if (bottomActive) {
+                return HTBOTTOM;
+            }
+            if (leftActive) {
+                return HTLEFT;
+            }
+            return HTCLIENT;
+        }
+        if (hitTestResult == HTBOTTOMRIGHT) {
+            if (rightActive && bottomActive) {
+                return HTBOTTOMRIGHT;
+            }
+            if (rightActive) {
+                return HTRIGHT;
+            }
+            if (bottomActive) {
+                return HTBOTTOM;
+            }
+            return HTCLIENT;
+        }
+        return hitTestResult;
+    }
+
+    static bool isValidWindow(HWND hWnd, bool checkVisible, bool checkTopLevel) {
+        Q_ASSERT(hWnd);
+        if (!::IsWindow(hWnd)) {
+            return false;
+        }
+        const LONG_PTR styles = ::GetWindowLongPtrW(hWnd, GWL_STYLE);
+        if (styles & WS_DISABLED) {
+            return false;
+        }
+        const LONG_PTR exStyles = ::GetWindowLongPtrW(hWnd, GWL_EXSTYLE);
+        if (exStyles & WS_EX_TOOLWINDOW) {
+            return false;
+        }
+        RECT rect{};
+        if (!::GetWindowRect(hWnd, &rect)) {
+            return false;
+        }
+        if ((rect.left >= rect.right) || (rect.top >= rect.bottom)) {
+            return false;
+        }
+        if (checkVisible) {
+            if (!::IsWindowVisible(hWnd)) {
+                return false;
+            }
+        }
+        if (checkTopLevel) {
+            if (::GetAncestor(hWnd, GA_ROOT) != hWnd) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static inline constexpr bool isNonClientMessage(const UINT message) {
+        if (((message >= WM_NCCREATE) && (message <= WM_NCACTIVATE)) ||
+            ((message >= WM_NCMOUSEMOVE) && (message <= WM_NCMBUTTONDBLCLK)) ||
+            ((message >= WM_NCXBUTTONDOWN) && (message <= WM_NCXBUTTONDBLCLK))
+#if (WINVER >= _WIN32_WINNT_WIN8)
+            || ((message >= WM_NCPOINTERUPDATE) && (message <= WM_NCPOINTERUP))
+#endif
+            || ((message == WM_NCMOUSEHOVER) || (message == WM_NCMOUSELEAVE))) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    static MSG createMessageBlock(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+        Q_ASSERT(hWnd);
+
+        MSG msg{};
+        msg.hwnd = hWnd;
+        msg.message = message;
+        msg.wParam = wParam;
+        msg.lParam = lParam;
+
+        const DWORD dwScreenPos = ::GetMessagePos();
+        msg.pt.x = GET_X_LPARAM(dwScreenPos);
+        msg.pt.y = GET_Y_LPARAM(dwScreenPos);
+        if (!isNonClientMessage(message)) {
+            ::ScreenToClient(hWnd, &msg.pt);
+        }
+
+        msg.time = ::GetMessageTime();
+        return msg;
+    }
+
+    static inline constexpr bool isInputMessage(UINT m) {
+        switch (m) {
+            case WM_IME_STARTCOMPOSITION:
+            case WM_IME_ENDCOMPOSITION:
+            case WM_IME_COMPOSITION:
+            case WM_INPUT:
+            case WM_TOUCH:
+            case WM_MOUSEHOVER:
+            case WM_MOUSELEAVE:
+            case WM_NCMOUSEHOVER:
+            case WM_NCMOUSELEAVE:
+            case WM_SIZING:
+            case WM_MOVING:
+            case WM_SYSCOMMAND:
+            case WM_COMMAND:
+            case WM_DWMNCRENDERINGCHANGED:
+            case WM_PAINT:
+                return true;
+            default:
+                break;
+        }
+        return (m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) ||
+               (m >= WM_NCMOUSEMOVE && m <= WM_NCXBUTTONDBLCLK) ||
+               (m >= WM_KEYFIRST && m <= WM_KEYLAST);
+    }
+
+    static inline QByteArray nativeEventType() {
+        return QByteArrayLiteral("windows_generic_MSG");
+    }
+
+    // Send to QAbstractEventDispatcher
+    static bool filterNativeEvent(MSG *msg, LRESULT *result) {
+        Q_ASSERT(msg);
+        Q_ASSERT(result);
+        auto dispatcher = QAbstractEventDispatcher::instance();
+        QT_NATIVE_EVENT_RESULT_TYPE filterResult = *result;
+        if (dispatcher && dispatcher->filterNativeEvent(nativeEventType(), msg, &filterResult)) {
+            *result = LRESULT(filterResult);
+            return true;
+        }
+        return false;
+    }
+
+    // Send to QWindowSystemInterface
+    static bool filterNativeEvent(QWindow *window, MSG *msg, LRESULT *result) {
+        Q_ASSERT(window);
+        Q_ASSERT(msg);
+        Q_ASSERT(result);
+        QT_NATIVE_EVENT_RESULT_TYPE filterResult = *result;
+        if (QWindowSystemInterface::handleNativeEvent(window, nativeEventType(), msg,
+                                                      &filterResult)) {
+            *result = LRESULT(filterResult);
+            return true;
+        }
+        return false;
+    }
+
+    static inline bool forwardFilteredEvent(QWindow *window, HWND hWnd, UINT message, WPARAM wParam,
+                                            LPARAM lParam, LRESULT *result) {
+        Q_ASSERT(window);
+        Q_ASSERT(hWnd);
+        Q_ASSERT(result);
+
+        MSG msg = createMessageBlock(hWnd, message, wParam, lParam);
+
+        // https://github.com/qt/qtbase/blob/e26a87f1ecc40bc8c6aa5b889fce67410a57a702/src/plugins/platforms/windows/qwindowscontext.cpp#L1025
+        // Do exact the same as what Qt Windows plugin does.
+
+        // Run the native event filters. QTBUG-67095: Exclude input messages which are sent
+        // by QEventDispatcherWin32::processEvents()
+        if (!isInputMessage(msg.message) && filterNativeEvent(&msg, result))
+            return true;
+
+        auto platformWindow = window->handle();
+        if (platformWindow && filterNativeEvent(platformWindow->window(), &msg, result))
+            return true;
+
+        return false;
+    }
+
+    // https://github.com/qt/qtbase/blob/e26a87f1ecc40bc8c6aa5b889fce67410a57a702/src/plugins/platforms/windows/qwindowscontext.cpp#L1556
+    // In QWindowsContext::windowsProc(), the messages will be passed to all global native event
+    // filters, but because we have already filtered the messages in the hook WndProc function for
+    // convenience, Qt does not know we may have already processed the messages and thus will call
+    // DefWindowProc(). Consequently, we have to add a global native filter that forwards the result
+    // of the hook function, telling Qt whether we have filtered the events before. Since Qt only
+    // handles Windows window messages in the main thread, it is safe to do so.
+    class WindowsNativeEventFilter : public AppNativeEventFilter {
+    public:
+        bool nativeEventFilter(const QByteArray &eventType, void *message,
+                               QT_NATIVE_EVENT_RESULT_TYPE *result) override {
+            Q_UNUSED(eventType)
+
+            // It has been observed that the pointer that Qt gives us is sometimes null on some
+            // machines. We need to guard against it in such scenarios.
+            if (!result || !message) {
+                return false;
+            }
+
+            auto msg = static_cast<const MSG *>(message);
+            switch (msg->message) {
+                case WM_NCCALCSIZE: {
+                    // https://github.com/qt/qtbase/blob/e26a87f1ecc40bc8c6aa5b889fce67410a57a702/src/plugins/platforms/windows/qwindowscontext.cpp#L1546
+                    // Qt needs to refer to the WM_NCCALCSIZE message data that hasn't been
+                    // processed, so we have to process it after Qt acquires the initial data.
+                    if (lastMessageContext) {
+                        LRESULT res;
+                        if (lastMessageContext->nonClientCalcSizeHandler(
+                                msg->hwnd, msg->message, msg->wParam, msg->lParam, &res)) {
+                            *result = decltype(*result)(res);
+                            return true;
+                        }
+                    }
+                    break;
+                }
+
+                    // case WM_NCHITTEST: {
+                    //     // The child window must return HTTRANSPARENT when processing WM_NCHITTEST for
+                    //     // the parent window to receive WM_NCHITTEST.
+                    //     if (!lastMessageContext) {
+                    //         auto rootHWnd = ::GetAncestor(msg->hwnd, GA_ROOT);
+                    //         if (rootHWnd != msg->hwnd) {
+                    //             if (auto ctx = g_wndProcHash->value(rootHWnd)) {
+                    //                 *result = HTTRANSPARENT;
+                    //                 return true;
+                    //             }
+                    //         }
+                    //     }
+                    //     break;
+                    // }
+            }
+            return false;
+        }
+
+        static inline WindowsNativeEventFilter *instance = nullptr;
+        static inline Win32WindowContext *lastMessageContext = nullptr;
+
+        static inline void install() {
+            if (instance) {
+                return;
+            }
+            instance = new WindowsNativeEventFilter();
+        }
+
+        static inline void uninstall() {
+            if (!instance) {
+                return;
+            }
+            delete std::exchange(instance, nullptr);
+        }
+    };
+
+    // https://github.com/qt/qtbase/blob/e26a87f1ecc40bc8c6aa5b889fce67410a57a702/src/plugins/platforms/windows/qwindowscontext.cpp#L1025
+    // We can see from the source code that Qt will filter out some messages first and then send the
+    // unfiltered messages to the event dispatcher. To activate the Snap Layout feature on Windows
+    // 11, we must process some non-client area messages ourselves, but unfortunately these messages
+    // have been filtered out already in that line, and thus we'll never have the chance to process
+    // them ourselves. This is Qt's low level platform specific code, so we don't have any official
+    // ways to change this behavior. But luckily we can replace the window procedure function of
+    // Qt's windows, and in this hooked window procedure function, we finally have the chance to
+    // process window messages before Qt touches them. So we reconstruct the MSG structure and send
+    // it to our own custom native event filter to do all the magic works. But since the system menu
+    // feature doesn't necessarily belong to the native implementation, we seperate the handling
+    // code and always process the system menu part in this function for both implementations.
+    //
+    // Original event flow:
+    //      [Entry]             Windows Message Queue
+    //                          |
+    //      [Qt Window Proc]    qwindowscontext.cpp#L1547: qWindowsWndProc()
+    //                              ```
+    //                              const bool handled = QWindowsContext::instance()->windowsProc
+    //                                  (hwnd, message, et, wParam, lParam, &result,
+    //                                  &platformWindow);
+    //                              ```
+    //                          |
+    //      [Non-Input Filter]  qwindowscontext.cpp#L1025: QWindowsContext::windowsProc()
+    //                              ```
+    //                              if (!isInputMessage(msg.message) &&
+    //                                  filterNativeEvent(&msg, result))
+    //                                  return true;
+    //                              ```
+    //                          |
+    //      [User Filter]       qwindowscontext.cpp#L1588: QWindowsContext::windowsProc()
+    //                              ```
+    //                              QAbstractEventDispatcher *dispatcher =
+    //                              QAbstractEventDispatcher::instance();
+    //                              qintptr filterResult = 0;
+    //                              if (dispatcher &&
+    //                              dispatcher->filterNativeEvent(nativeEventType(), msg,
+    //                              &filterResult)) {
+    //                                  *result = LRESULT(filterResult);
+    //                                  return true;
+    //                              }
+    //                              ```
+    //                          |
+    //      [Extra work]        The rest of QWindowsContext::windowsProc() and qWindowsWndProc()
+    //
+    // Notice: Only non-input messages will be processed by the user-defined global native event
+    // filter!!! These events are then passed to the widget class's own overridden
+    // QWidget::nativeEvent() as a local filter, where all native events can be handled, but we must
+    // create a new class derived from QWidget which we don't intend to. Therefore, we don't expect
+    // to process events from the global native event filter, but instead hook Qt's window
+    // procedure.
+
+    extern "C" LRESULT QT_WIN_CALLBACK QWKHookedWndProc(HWND hWnd, UINT message, WPARAM wParam,
+                                                        LPARAM lParam) {
+        Q_ASSERT(hWnd);
+        if (!hWnd) {
+            return FALSE;
+        }
+
+        // QWindow may have been destroyed before WinIdChange event comes
+        auto ctx = g_wndProcHash->value(hWnd);
+        if (!ctx || !ctx->window()) {
+            return ::CallWindowProcW(g_qtWindowProc, hWnd, message, wParam, lParam);
+        }
+
+        WindowsNativeEventFilter::lastMessageContext = ctx;
+        const auto &contextCleaner = qScopeGuard([]() {
+            WindowsNativeEventFilter::lastMessageContext = nullptr; //
+        });
+
+        // Since Qt does the necessary processing of the WM_NCCALCSIZE message, we need to
+        // forward it right away and process it in our native event filter.
+        if (message == WM_NCCALCSIZE) {
+            return ::CallWindowProcW(g_qtWindowProc, hWnd, message, wParam, lParam);
+        }
+
+        // Try hooked procedure and save result
+        LRESULT result;
+        if (ctx->windowProc(hWnd, message, wParam, lParam, &result)) {
+            // https://github.com/stdware/qwindowkit/issues/45
+            // Forward the event to user-defined native event filters, there may be some messages
+            // that need to be processed by the user.
+            std::ignore =
+                forwardFilteredEvent(ctx->window(), hWnd, message, wParam, lParam, &result);
+            return result;
+        }
+
+        // Continue dispatching.
+        return ::CallWindowProcW(g_qtWindowProc, hWnd, message, wParam, lParam);
+    }
+
+    static inline void addManagedWindow(QWindow *window, HWND hWnd, Win32WindowContext *ctx) {
+        Q_ASSERT(window);
+        Q_ASSERT(hWnd);
+        Q_ASSERT(ctx);
+
+        if (isSystemBorderEnabled()) {
+            // Inform Qt we want and have set custom margins
+            setInternalWindowFrameMargins(window, QMargins(0, -int(getTitleBarHeight(hWnd)), 0, 0));
+        }
+
+        // Store original window proc
+        if (!g_qtWindowProc) {
+            g_qtWindowProc = reinterpret_cast<WNDPROC>(::GetWindowLongPtrW(hWnd, GWLP_WNDPROC));
+        }
+
+        // Hook window proc
+        ::SetWindowLongPtrW(hWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(QWKHookedWndProc));
+
+        // Install global native event filter
+        WindowsNativeEventFilter::install();
+
+        // Save window handle mapping
+        g_wndProcHash->insert(hWnd, ctx);
+
+        // Force a WM_NCCALCSIZE message manually to avoid the title bar become visible
+        // while Qt is re-creating the window (such as setWindowFlag(s) calls). It has
+        // been observed by our users.
+        triggerFrameChange(hWnd);
+    }
+
+    static inline void removeManagedWindow(HWND hWnd) {
+        Q_ASSERT(hWnd);
+
+        // Remove window handle mapping
+        if (!g_wndProcHash->remove(hWnd))
+            return;
+
+        // Remove event filter if the all windows has been destroyed
+        if (g_wndProcHash->empty()) {
+            WindowsNativeEventFilter::uninstall();
+        }
+    }
+
+    Win32WindowContext::Win32WindowContext() = default;
+
+    Win32WindowContext::~Win32WindowContext() {
+        if (m_windowId) {
+            removeManagedWindow(reinterpret_cast<HWND>(m_windowId));
+        }
+    }
+
+    QString Win32WindowContext::key() const {
+        return QStringLiteral("win32");
+    }
+
+    void Win32WindowContext::virtual_hook(int id, void *data) {
+        switch (id) {
+            case RaiseWindowHook: {
+                if (!m_windowId)
+                    return;
+                m_delegate->setWindowVisible(m_host, true);
+                const auto hwnd = reinterpret_cast<HWND>(m_windowId);
+                bringWindowToFront(hwnd);
+                return;
+            }
+
+            case ShowSystemMenuHook: {
+                if (!m_windowId)
+                    return;
+                const auto &pos = *static_cast<const QPoint *>(data);
+                auto hWnd = reinterpret_cast<HWND>(m_windowId);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+                const QPoint nativeGlobalPos =
+                    QHighDpi::toNativeGlobalPosition(pos, m_windowHandle.data());
+#else
+                const QPoint nativeGlobalPos = QHighDpi::toNativePixels(pos, m_windowHandle.data());
+#endif
+                std::ignore = showSystemMenu_sys(hWnd, qpoint2point(nativeGlobalPos), false,
+                                                 isHostSizeFixed());
+                return;
+            }
+
+            case DefaultColorsHook: {
+                auto &map = *static_cast<QMap<QString, QColor> *>(data);
+                map.clear();
+                map.insert(QStringLiteral("activeLight"), kWindowsColorSet.activeLight);
+                map.insert(QStringLiteral("activeDark"), kWindowsColorSet.activeDark);
+                map.insert(QStringLiteral("inactiveLight"), kWindowsColorSet.inactiveLight);
+                map.insert(QStringLiteral("inactiveDark"), kWindowsColorSet.inactiveDark);
+                return;
+            }
+
+#if QWINDOWKIT_CONFIG(ENABLE_WINDOWS_SYSTEM_BORDERS)
+            // ### FIXME: May be deprecated
+            case DrawWindows10BorderHook_Emulated: {
+                if (!m_windowId)
+                    return;
+
+                auto args = static_cast<void **>(data);
+                auto &painter = *static_cast<QPainter *>(args[0]);
+                const auto &rect = *static_cast<const QRect *>(args[1]);
+                const auto &region = *static_cast<const QRegion *>(args[2]);
+                const auto hwnd = reinterpret_cast<HWND>(m_windowId);
+
+                QPen pen;
+#  if QT_VERSION_MAJOR < 6
+                pen.setWidth(1);
+#  else
+                pen.setWidthF(1 / m_windowHandle->devicePixelRatio()); // why 0.25?
+#  endif
+
+                const bool dark = isDarkThemeActive() && isDarkWindowFrameEnabled(hwnd);
+                if (m_delegate->isWindowActive(m_host)) {
+                    if (isWindowFrameBorderColorized()) {
+                        pen.setColor(getAccentColor());
+                    } else {
+                        static QColor frameBorderActiveColorLight(kWindowsColorSet.activeLight);
+                        static QColor frameBorderActiveColorDark(kWindowsColorSet.activeDark);
+                        pen.setColor(dark ? frameBorderActiveColorDark
+                                          : frameBorderActiveColorLight);
+                    }
+                } else {
+                    static QColor frameBorderInactiveColorLight(kWindowsColorSet.inactiveLight);
+                    static QColor frameBorderInactiveColorDark(kWindowsColorSet.inactiveDark);
+                    pen.setColor(dark ? frameBorderInactiveColorDark
+                                      : frameBorderInactiveColorLight);
+                }
+                painter.save();
+
+                // We need antialiasing to give us better result.
+                painter.setRenderHint(QPainter::Antialiasing);
+
+                painter.setPen(pen);
+                painter.drawLine(QLine{
+                    QPoint{0,                       0},
+                    QPoint{m_windowHandle->width(), 0}
+                });
+                painter.restore();
+                return;
+            }
+
+            case DrawWindows10BorderHook_Native: {
+                if (!m_windowId)
+                    return;
+
+                // https://github.com/microsoft/terminal/blob/71a6f26e6ece656084e87de1a528c4a8072eeabd/src/cascadia/WindowsTerminal/NonClientIslandWindow.cpp#L1025
+                // https://docs.microsoft.com/en-us/windows/win32/dwm/customframe#extending-the-client-frame
+                // Draw a black rectangle to make Windows native top border show
+
+                auto hWnd = reinterpret_cast<HWND>(m_windowId);
+                HDC hdc = ::GetDC(hWnd);
+                RECT windowRect{};
+                ::GetClientRect(hWnd, &windowRect);
+                RECT rcTopBorder = {
+                    0,
+                    0,
+                    RECT_WIDTH(windowRect),
+                    1,
+                };
+                ::FillRect(hdc, &rcTopBorder,
+                           reinterpret_cast<HBRUSH>(::GetStockObject(BLACK_BRUSH)));
+                ::ReleaseDC(hWnd, hdc);
+                return;
+            }
+#endif
+
+            default:
+                break;
+        }
+        AbstractWindowContext::virtual_hook(id, data);
+    }
+
+    QVariant Win32WindowContext::windowAttribute(const QString &key) const {
+        if (key == QStringLiteral("window-rect")) {
+            if (!m_windowId)
+                return {};
+
+            RECT frame{};
+            auto hwnd = reinterpret_cast<HWND>(m_windowId);
+            // According to MSDN, WS_OVERLAPPED is not allowed for AdjustWindowRect.
+            auto style = static_cast<DWORD>(::GetWindowLongPtrW(hwnd, GWL_STYLE) & ~WS_OVERLAPPED);
+            auto exStyle = static_cast<DWORD>(::GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+            const DynamicApis &apis = DynamicApis::instance();
+            if (apis.pAdjustWindowRectExForDpi) {
+                apis.pAdjustWindowRectExForDpi(&frame, style, FALSE, exStyle,
+                                               getDpiForWindow(hwnd));
+            } else {
+                ::AdjustWindowRectEx(&frame, style, FALSE, exStyle);
+            }
+            return QVariant::fromValue(rect2qrect(frame));
+        }
+
+        if (key == QStringLiteral("win10-border-needed")) {
+            return isSystemBorderEnabled() && !isWin11OrGreater();
+        }
+
+        if (key == QStringLiteral("windows-system-border-enabled")) {
+            return isSystemBorderEnabled();
+        }
+
+        if (key == QStringLiteral("border-thickness")) {
+            return m_windowId
+                       ? int(getWindowFrameBorderThickness(reinterpret_cast<HWND>(m_windowId)))
+                       : 0;
+        }
+
+        if (key == QStringLiteral("title-bar-height")) {
+            return m_windowId ? int(getTitleBarHeight(reinterpret_cast<HWND>(m_windowId))) : 0;
+        }
+        return AbstractWindowContext::windowAttribute(key);
+    }
+
+    void Win32WindowContext::winIdChanged(WId winId, WId oldWinId) {
+        // Reset the context data
+        mouseLeaveBlocked = false;
+        lastHitTestResult = WindowPart::Outside;
+        lastHitTestResultRaw = HTNOWHERE;
+
+        // If the original window id is valid, remove all resources related
+        if (oldWinId) {
+            removeManagedWindow(reinterpret_cast<HWND>(oldWinId));
+        }
+        if (!winId) {
+            return;
+        }
+
+        // Install window hook
+        auto hWnd = reinterpret_cast<HWND>(winId);
+        if (!isSystemBorderEnabled()) {
+            static auto margins = QVariant::fromValue(QMargins(1, 1, 1, 1));
+
+            // If we remove the system border, the window will lose its shadow. If dwm is enabled,
+            // then we need to set at least 1px margins, otherwise the following operation will
+            // fail with no effect.
+            setWindowAttribute(QStringLiteral("extra-margins"), margins);
+        }
+
+        // We should disable WS_SYSMENU, otherwise the system button icons will be visible if mica
+        // is enabled and the title bar is transparent.
+        {
+            auto style = ::GetWindowLongPtrW(hWnd, GWL_STYLE);
+            if (isSystemBorderEnabled()) {
+                ::SetWindowLongPtrW(hWnd, GWL_STYLE, style & (~WS_SYSMENU));
+            } else {
+                ::SetWindowLongPtrW(hWnd, GWL_STYLE,
+                                    (style | WS_THICKFRAME | WS_CAPTION) & (~WS_SYSMENU));
+            }
+        }
+
+        // Add managed window
+        addManagedWindow(m_windowHandle, hWnd, this);
+    }
+
+    bool Win32WindowContext::windowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                        LRESULT *result) {
+        Q_ASSERT(hWnd);
+        Q_ASSERT(result);
+
+        *result = FALSE;
+
+        // We should skip these messages otherwise we will get crashes.
+        // NOTE: WM_QUIT won't be posted to the WindowProc function.
+        switch (message) {
+            case WM_DESTROY:
+            case WM_CLOSE:
+            case WM_NCDESTROY:
+            // Undocumented messages:
+            case WM_UAHDESTROYWINDOW:
+            case WM_UNREGISTER_WINDOW_SERVICES:
+                return false;
+            default:
+                break;
+        }
+
+        if (!isValidWindow(hWnd, false, true)) {
+            return false;
+        }
+
+        // Test snap layout
+        if (snapLayoutHandler(hWnd, message, wParam, lParam, result)) {
+            return true;
+        }
+
+        // Main implementation
+        if (customWindowHandler(hWnd, message, wParam, lParam, result)) {
+            return true;
+        }
+
+        // Whether to show system menu
+        if (!noSystemMenu && systemMenuHandler(hWnd, message, wParam, lParam, result)) {
+            return true;
+        }
+
+        // Forward to native event filter subscribers
+        if (!m_nativeEventFilters.isEmpty()) {
+            MSG msg = createMessageBlock(hWnd, message, wParam, lParam);
+            QT_NATIVE_EVENT_RESULT_TYPE res = 0;
+            if (nativeDispatch(nativeEventType(), &msg, &res)) {
+                *result = LRESULT(res);
+                return true;
+            }
+        }
+        return false; // Not handled
+    }
+
+    bool Win32WindowContext::windowAttributeChanged(const QString &key, const QVariant &attribute,
+                                                    const QVariant &oldAttribute) {
+        Q_UNUSED(oldAttribute)
+
+        const auto hwnd = reinterpret_cast<HWND>(m_windowId);
+        Q_ASSERT(hwnd);
+
+        const DynamicApis &apis = DynamicApis::instance();
+        const auto &extendMargins = [this, &apis, hwnd]() {
+            // For some unknown reason, the window background is totally black and extending
+            // the window frame into the client area seems to fix it magically.
+            // After many times of trying, we found that the Acrylic/Mica/Mica Alt background
+            // only appears on the native Win32 window's background, so naturally we want to
+            // extend the window frame into the whole client area to be able to let the special
+            // material fill the whole window. Previously we are using negative margins because
+            // it's widely known that using negative margins will let the window frame fill
+            // the whole window and that's indeed what we wanted to do, however, later we found
+            // that doing so is causing issues. When the user enabled the "show accent color on
+            // window title bar and borders" option on system personalize settings, a 30px bar
+            // would appear on window top. It has the same color with the system accent color.
+            // Actually it's the original title bar we've already hidden, and it magically
+            // appears again when we use negative margins to extend the window frame. And again
+            // after some experiments, I found that the title bar won't appear if we don't extend
+            // from the top side. In the end I found that we only need to extend from the left
+            // side if we extend long enough. In this way we can see the special material even
+            // when the host object is a QWidget and the title bar still remain hidden. But even
+            // though this solution seems perfect, I really don't know why it works. The following
+            // hack is totally based on experiments.
+            static constexpr const MARGINS margins = {65536, 0, 0, 0};
+            apis.pDwmExtendFrameIntoClientArea(hwnd, &margins);
+        };
+        const auto &restoreMargins = [this, &apis, hwnd]() {
+            auto margins = qmargins2margins(
+                windowAttribute(QStringLiteral("extra-margins")).value<QMargins>());
+            apis.pDwmExtendFrameIntoClientArea(hwnd, &margins);
+        };
+
+        const auto &effectBugWorkaround = [this, hwnd]() {
+            // We don't need the following *HACK* for QWidget windows.
+            // Completely based on actual experiments, root reason is totally unknown.
+
+            // TODO: add more descriptions
+            if (m_host->isWidgetType()) {
+                return;
+            }
+
+            static const char *kPropKey = "_qwk_effectBugWorkaround1";
+            if (property(kPropKey).toBool()) {
+                return;
+            }
+            setProperty(kPropKey, true);
+
+            RECT rect{};
+            ::GetWindowRect(hwnd, &rect);
+            ::MoveWindow(hwnd, rect.left, rect.top, 1, 1, FALSE);
+            ::MoveWindow(hwnd, rect.right - 1, rect.bottom - 1, 1, 1, FALSE);
+            ::MoveWindow(hwnd, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
+                         FALSE);
+        };
+
+        if (key == QStringLiteral("no-system-menu")) {
+            noSystemMenu = attribute.toBool();
+            return true;
+        }
+
+        if (key == QStringLiteral("qrounded-resize-edge-inset") ||
+            key == QStringLiteral("qrounded-resize-corner-inset")) {
+            return true;
+        }
+
+        if (key == QStringLiteral("extra-margins")) {
+            auto margins = qmargins2margins(attribute.value<QMargins>());
+            return SUCCEEDED(apis.pDwmExtendFrameIntoClientArea(hwnd, &margins));
+        }
+
+        if (key == QStringLiteral("dark-mode")) {
+            if (!isWin101809OrGreater()) {
+                return false;
+            }
+
+            BOOL enable = attribute.toBool();
+            if (isWin101903OrGreater()) {
+                apis.pSetPreferredAppMode(enable ? PAM_AUTO : PAM_DEFAULT);
+            } else {
+                apis.pAllowDarkModeForApp(enable);
+            }
+            const auto attr = isWin1020H1OrGreater() ? _DWMWA_USE_IMMERSIVE_DARK_MODE
+                                                     : _DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1;
+            apis.pDwmSetWindowAttribute(hwnd, attr, &enable, sizeof(enable));
+
+            apis.pFlushMenuThemes();
+            return true;
+        }
+
+        // For Win11 or later
+        if (key == QStringLiteral("mica")) {
+            if (!isWin11OrGreater()) {
+                return false;
+            }
+            if (attribute.toBool()) {
+                extendMargins();
+                if (isWin1122H2OrGreater()) {
+                    // Use official DWM API to enable Mica, available since Windows 11 22H2
+                    // (10.0.22621).
+                    const _DWM_SYSTEMBACKDROP_TYPE backdropType = _DWMSBT_MAINWINDOW;
+                    apis.pDwmSetWindowAttribute(hwnd, _DWMWA_SYSTEMBACKDROP_TYPE, &backdropType,
+                                                sizeof(backdropType));
+                } else {
+                    // Use undocumented DWM API to enable Mica, available since Windows 11
+                    // (10.0.22000).
+                    const BOOL enable = TRUE;
+                    apis.pDwmSetWindowAttribute(hwnd, _DWMWA_MICA_EFFECT, &enable, sizeof(enable));
+                }
+            } else {
+                if (isWin1122H2OrGreater()) {
+                    const _DWM_SYSTEMBACKDROP_TYPE backdropType = _DWMSBT_AUTO;
+                    apis.pDwmSetWindowAttribute(hwnd, _DWMWA_SYSTEMBACKDROP_TYPE, &backdropType,
+                                                sizeof(backdropType));
+                } else {
+                    const BOOL enable = FALSE;
+                    apis.pDwmSetWindowAttribute(hwnd, _DWMWA_MICA_EFFECT, &enable, sizeof(enable));
+                }
+                restoreMargins();
+            }
+            effectBugWorkaround();
+            return true;
+        }
+
+        if (key == QStringLiteral("mica-alt")) {
+            if (!isWin1122H2OrGreater()) {
+                return false;
+            }
+            if (attribute.toBool()) {
+                extendMargins();
+                // Use official DWM API to enable Mica Alt, available since Windows 11 22H2
+                // (10.0.22621).
+                const _DWM_SYSTEMBACKDROP_TYPE backdropType = _DWMSBT_TABBEDWINDOW;
+                apis.pDwmSetWindowAttribute(hwnd, _DWMWA_SYSTEMBACKDROP_TYPE, &backdropType,
+                                            sizeof(backdropType));
+            } else {
+                const _DWM_SYSTEMBACKDROP_TYPE backdropType = _DWMSBT_AUTO;
+                apis.pDwmSetWindowAttribute(hwnd, _DWMWA_SYSTEMBACKDROP_TYPE, &backdropType,
+                                            sizeof(backdropType));
+                restoreMargins();
+            }
+            effectBugWorkaround();
+            return true;
+        }
+
+        if (key == QStringLiteral("acrylic-material")) {
+            if (!isWin11OrGreater()) {
+                return false;
+            }
+            if (attribute.toBool()) {
+                extendMargins();
+
+                const _DWM_SYSTEMBACKDROP_TYPE backdropType = _DWMSBT_TRANSIENTWINDOW;
+                apis.pDwmSetWindowAttribute(hwnd, _DWMWA_SYSTEMBACKDROP_TYPE, &backdropType,
+                                            sizeof(backdropType));
+
+                // PRIVATE API REFERENCE:
+                //     QColor gradientColor = {};
+                //     ACCENT_POLICY policy{};
+                //     policy.dwAccentState = ACCENT_ENABLE_ACRYLICBLURBEHIND;
+                //     policy.dwAccentFlags = ACCENT_ENABLE_ACRYLIC_WITH_LUMINOSITY;
+                //     // This API expects the #AABBGGRR format.
+                //     policy.dwGradientColor =
+                //         DWORD(qRgba(gradientColor.blue(), gradientColor.green(),
+                //                     gradientColor.red(), gradientColor.alpha()));
+                //     WINDOWCOMPOSITIONATTRIBDATA wcad{};
+                //     wcad.Attrib = WCA_ACCENT_POLICY;
+                //     wcad.pvData = &policy;
+                //     wcad.cbData = sizeof(policy);
+                //     apis.pSetWindowCompositionAttribute(hwnd, &wcad);
+            } else {
+                const _DWM_SYSTEMBACKDROP_TYPE backdropType = _DWMSBT_AUTO;
+                apis.pDwmSetWindowAttribute(hwnd, _DWMWA_SYSTEMBACKDROP_TYPE, &backdropType,
+                                            sizeof(backdropType));
+
+                // PRIVATE API REFERENCE:
+                //     ACCENT_POLICY policy{};
+                //     policy.dwAccentState = ACCENT_DISABLED;
+                //     policy.dwAccentFlags = ACCENT_NONE;
+                //     WINDOWCOMPOSITIONATTRIBDATA wcad{};
+                //     wcad.Attrib = WCA_ACCENT_POLICY;
+                //     wcad.pvData = &policy;
+                //     wcad.cbData = sizeof(policy);
+                //     apis.pSetWindowCompositionAttribute(hwnd, &wcad);
+
+                restoreMargins();
+            }
+            effectBugWorkaround();
+            return true;
+        }
+
+        if (key == QStringLiteral("dwm-blur")) {
+            // Extending window frame would break this effect for some unknown reason.
+            restoreMargins();
+            if (attribute.toBool()) {
+                if (isWin8OrGreater()) {
+                    ACCENT_POLICY policy{};
+                    policy.dwAccentState = ACCENT_ENABLE_BLURBEHIND;
+                    policy.dwAccentFlags = ACCENT_NONE;
+                    WINDOWCOMPOSITIONATTRIBDATA wcad{};
+                    wcad.Attrib = WCA_ACCENT_POLICY;
+                    wcad.pvData = &policy;
+                    wcad.cbData = sizeof(policy);
+                    apis.pSetWindowCompositionAttribute(hwnd, &wcad);
+                } else {
+                    DWM_BLURBEHIND bb{};
+                    bb.fEnable = TRUE;
+                    bb.dwFlags = DWM_BB_ENABLE;
+                    apis.pDwmEnableBlurBehindWindow(hwnd, &bb);
+                }
+            } else {
+                if (isWin8OrGreater()) {
+                    ACCENT_POLICY policy{};
+                    policy.dwAccentState = ACCENT_DISABLED;
+                    policy.dwAccentFlags = ACCENT_NONE;
+                    WINDOWCOMPOSITIONATTRIBDATA wcad{};
+                    wcad.Attrib = WCA_ACCENT_POLICY;
+                    wcad.pvData = &policy;
+                    wcad.cbData = sizeof(policy);
+                    apis.pSetWindowCompositionAttribute(hwnd, &wcad);
+                } else {
+                    DWM_BLURBEHIND bb{};
+                    bb.fEnable = FALSE;
+                    bb.dwFlags = DWM_BB_ENABLE;
+                    apis.pDwmEnableBlurBehindWindow(hwnd, &bb);
+                }
+            }
+            effectBugWorkaround();
+            return true;
+        }
+        
+        if (key == QStringLiteral("dwm-border-color")) {
+            if (!isWin11OrGreater()) {
+                return false;
+            }
+            if (!attribute.canConvert<QColor>()) {
+                return false;
+            }
+
+            QColor color = attribute.value<QColor>();
+            COLORREF colorRef = RGB(color.red(), color.green(), color.blue());
+            apis.pDwmSetWindowAttribute(hwnd, _DWMWA_BORDER_COLOR, &colorRef, sizeof(colorRef));
+            return true;
+        }
+        return false;
+    }
+
+    QWK_USED static constexpr const struct {
+        const WPARAM wParam = MAKEWPARAM(44500, 61897);
+        const LPARAM lParam = MAKELPARAM(62662, 44982); // Not used. Reserve for future use.
+    } kMessageTag;
+
+    static inline quint64 getKeyState() {
+        quint64 result = 0;
+        const auto &get = [](const int virtualKey) -> bool {
+            return (::GetAsyncKeyState(virtualKey) < 0);
+        };
+        const bool buttonSwapped = ::GetSystemMetrics(SM_SWAPBUTTON);
+        if (get(VK_LBUTTON)) {
+            result |= (buttonSwapped ? MK_RBUTTON : MK_LBUTTON);
+        }
+        if (get(VK_RBUTTON)) {
+            result |= (buttonSwapped ? MK_LBUTTON : MK_RBUTTON);
+        }
+        if (get(VK_SHIFT)) {
+            result |= MK_SHIFT;
+        }
+        if (get(VK_CONTROL)) {
+            result |= MK_CONTROL;
+        }
+        if (get(VK_MBUTTON)) {
+            result |= MK_MBUTTON;
+        }
+        if (get(VK_XBUTTON1)) {
+            result |= MK_XBUTTON1;
+        }
+        if (get(VK_XBUTTON2)) {
+            result |= MK_XBUTTON2;
+        }
+        return result;
+    }
+
+    static void emulateClientAreaMessage(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                         const std::optional<int> &overrideMessage = std::nullopt) {
+        Q_ASSERT(hWnd);
+        const int myMsg = overrideMessage.value_or(message);
+        const auto wParamNew = [myMsg, wParam]() -> WPARAM {
+            if (myMsg == WM_NCMOUSELEAVE) {
+                // wParam is always ignored in mouse leave messages, but here we
+                // give them a special tag to be able to distinguish which messages
+                // are sent by ourselves.
+                return kMessageTag.wParam;
+            }
+            const quint64 keyState = getKeyState();
+            if ((myMsg >= WM_NCXBUTTONDOWN) && (myMsg <= WM_NCXBUTTONDBLCLK)) {
+                const auto xButtonMask = GET_XBUTTON_WPARAM(wParam);
+                return MAKEWPARAM(keyState, xButtonMask);
+            }
+            if (myMsg == WM_NCPOINTERDOWN) {
+                return keyState | MK_LBUTTON;
+            }
+            return keyState;
+        }();
+        const auto lParamNew = [myMsg, lParam, hWnd]() -> LPARAM {
+            if (myMsg == WM_NCMOUSELEAVE) {
+                // lParam is always ignored in mouse leave messages.
+                return 0;
+            }
+            const auto screenPos = POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            POINT clientPos = screenPos;
+            ::ScreenToClient(hWnd, &clientPos);
+            return MAKELPARAM(clientPos.x, clientPos.y);
+        }();
+#if 0
+#  define SEND_MESSAGE ::SendMessageW
+#else
+#  define SEND_MESSAGE ::PostMessageW
+#endif
+        switch (myMsg) {
+            case WM_NCHITTEST: // Treat hit test messages as mouse move events.
+            case WM_NCMOUSEMOVE:
+                SEND_MESSAGE(hWnd, WM_MOUSEMOVE, wParamNew, lParamNew);
+                break;
+            case WM_NCLBUTTONDOWN:
+                SEND_MESSAGE(hWnd, WM_LBUTTONDOWN, wParamNew, lParamNew);
+                break;
+            case WM_NCLBUTTONUP:
+                SEND_MESSAGE(hWnd, WM_LBUTTONUP, wParamNew, lParamNew);
+                break;
+            case WM_NCLBUTTONDBLCLK:
+                SEND_MESSAGE(hWnd, WM_LBUTTONDBLCLK, wParamNew, lParamNew);
+                break;
+            case WM_NCRBUTTONDOWN:
+                SEND_MESSAGE(hWnd, WM_RBUTTONDOWN, wParamNew, lParamNew);
+                break;
+            case WM_NCRBUTTONUP:
+                SEND_MESSAGE(hWnd, WM_RBUTTONUP, wParamNew, lParamNew);
+                break;
+            case WM_NCRBUTTONDBLCLK:
+                SEND_MESSAGE(hWnd, WM_RBUTTONDBLCLK, wParamNew, lParamNew);
+                break;
+            case WM_NCMBUTTONDOWN:
+                SEND_MESSAGE(hWnd, WM_MBUTTONDOWN, wParamNew, lParamNew);
+                break;
+            case WM_NCMBUTTONUP:
+                SEND_MESSAGE(hWnd, WM_MBUTTONUP, wParamNew, lParamNew);
+                break;
+            case WM_NCMBUTTONDBLCLK:
+                SEND_MESSAGE(hWnd, WM_MBUTTONDBLCLK, wParamNew, lParamNew);
+                break;
+            case WM_NCXBUTTONDOWN:
+                SEND_MESSAGE(hWnd, WM_XBUTTONDOWN, wParamNew, lParamNew);
+                break;
+            case WM_NCXBUTTONUP:
+                SEND_MESSAGE(hWnd, WM_XBUTTONUP, wParamNew, lParamNew);
+                break;
+            case WM_NCXBUTTONDBLCLK:
+                SEND_MESSAGE(hWnd, WM_XBUTTONDBLCLK, wParamNew, lParamNew);
+                break;
+            case WM_NCPOINTERUPDATE:
+                SEND_MESSAGE(hWnd, WM_MOUSEMOVE, wParamNew, lParamNew);
+                break;
+            case WM_NCPOINTERDOWN:
+                SEND_MESSAGE(hWnd, WM_LBUTTONDOWN, wParamNew, lParamNew);
+                break;
+            case WM_NCPOINTERUP:
+                SEND_MESSAGE(hWnd, WM_LBUTTONUP, wParamNew, lParamNew);
+                break;
+            case WM_NCMOUSEHOVER:
+                SEND_MESSAGE(hWnd, WM_MOUSEHOVER, wParamNew, lParamNew);
+                break;
+            case WM_NCMOUSELEAVE:
+                SEND_MESSAGE(hWnd, WM_MOUSELEAVE, wParamNew, lParamNew);
+                break;
+            default:
+                // unreachable
+                break;
+        }
+
+#undef SEND_MESSAGE
+    }
+
+    static inline void requestForMouseLeaveMessage(HWND hWnd, bool nonClient) {
+        Q_ASSERT(hWnd);
+        TRACKMOUSEEVENT tme{};
+        tme.cbSize = sizeof(tme);
+        tme.dwFlags = TME_LEAVE;
+        if (nonClient) {
+            tme.dwFlags |= TME_NONCLIENT;
+        }
+        tme.hwndTrack = hWnd;
+        tme.dwHoverTime = HOVER_DEFAULT;
+        ::TrackMouseEvent(&tme);
+    }
+
+    bool Win32WindowContext::snapLayoutHandler(HWND hWnd, UINT message, WPARAM wParam,
+                                               LPARAM lParam, LRESULT *result) {
+        Q_ASSERT(hWnd);
+        Q_ASSERT(result);
+        switch (message) {
+            case WM_MOUSELEAVE: {
+                if (wParam != kMessageTag.wParam) {
+                    // Qt will call TrackMouseEvent() to get the WM_MOUSELEAVE message when it
+                    // receives WM_MOUSEMOVE messages, and since we are converting every
+                    // WM_NCMOUSEMOVE message to WM_MOUSEMOVE message and send it back to the window
+                    // to be able to hover our controls, we also get lots of WM_MOUSELEAVE messages
+                    // at the same time because of the reason above, and these superfluous mouse
+                    // leave events cause Qt to think the mouse has left the control, and thus we
+                    // actually lost the hover state. So we filter out these superfluous mouse leave
+                    // events here to avoid this issue.
+                    DWORD dwScreenPos = ::GetMessagePos();
+                    POINT screenPoint{GET_X_LPARAM(dwScreenPos), GET_Y_LPARAM(dwScreenPos)};
+                    ::ScreenToClient(hWnd, &screenPoint);
+                    QPoint qtScenePos = QHighDpi::fromNativeLocalPosition(point2qpoint(screenPoint),
+                                                                          m_windowHandle.data());
+                    auto dummy = WindowAgentBase::Unknown;
+                    if (isInSystemButtons(qtScenePos, &dummy)) {
+                        // We must record whether the last WM_MOUSELEAVE was filtered, because if
+                        // Qt does not receive this message it will not call TrackMouseEvent()
+                        // again, resulting in the client area not responding to any mouse event.
+                        mouseLeaveBlocked = true;
+                        *result = FALSE;
+                        return true;
+                    }
+                }
+                mouseLeaveBlocked = false;
+                break;
+            }
+
+            case WM_MOUSEMOVE: {
+                // At appropriate time, we will call TrackMouseEvent() for Qt. Simultaneously,
+                // we unset `mouseLeaveBlocked` mark and pretend as if Qt has received
+                // WM_MOUSELEAVE.
+                if (lastHitTestResult != WindowPart::ChromeButton && mouseLeaveBlocked) {
+                    mouseLeaveBlocked = false;
+                    requestForMouseLeaveMessage(hWnd, false);
+                }
+                break;
+            }
+
+            case WM_NCMOUSEMOVE:
+            case WM_NCLBUTTONDOWN:
+            case WM_NCLBUTTONUP:
+            case WM_NCLBUTTONDBLCLK:
+            case WM_NCRBUTTONDOWN:
+            case WM_NCRBUTTONUP:
+            case WM_NCRBUTTONDBLCLK:
+            case WM_NCMBUTTONDOWN:
+            case WM_NCMBUTTONUP:
+            case WM_NCMBUTTONDBLCLK:
+            case WM_NCXBUTTONDOWN:
+            case WM_NCXBUTTONUP:
+            case WM_NCXBUTTONDBLCLK:
+            case WM_NCPOINTERUPDATE:
+            case WM_NCPOINTERDOWN:
+            case WM_NCPOINTERUP:
+            case WM_NCMOUSEHOVER: {
+                if (message == WM_NCMOUSEMOVE) {
+                    if (lastHitTestResult != WindowPart::ChromeButton) {
+                        // https://github.com/qt/qtbase/blob/e26a87f1ecc40bc8c6aa5b889fce67410a57a702/src/widgets/kernel/qwidgetwindow.cpp#L472
+                        // When the mouse press event arrives, QWidgetWindow will implicitly grab
+                        // the top widget right under the mouse, and set `qt_button_down` to this
+                        // widget. At this time, no other widgets will accept the mouse event until
+                        // QWidgetWindow receives the mouse release event, then set `qt_button_down`
+                        // to null.
+
+                        // Imagine the following situation, now the main window has a pop-up menu,
+                        // the focus is not on the main window, if we click outside the pop-up menu,
+                        // the menu will close, which seems to be completely fine. But if we close
+                        // the menu by clicking on the title bar draggable area, then other widgets
+                        // won't accept the mouse message afterwards.
+
+                        // Here's the reason.
+                        // When the mouse is placed in the draggable area of the title bar, there
+                        // are two situations.
+
+                        // 1. If the focus is on the main window, and the last result of
+                        // WM_NCHITTEST is HTCAPTION, the mouse click event in the title bar is
+                        // taken over by Windows and Qt does not receive the mouse click event.
+
+                        // 2. If the main window has a pop-up menu, it is completely different. When
+                        // the mouse is pressed on the title bar, Windows sends the WM_LBUTTONDOWN
+                        // message to the window plane of the pop-up menu, the menu is closed, but
+                        // Qt will continue to forward the event to the QWidget under the mouse, and
+                        // the event will be processed by QWidgetWindow, causing the title bar
+                        // widget to be implicitly grabbed. After the menu is closed, Windows
+                        // immediately sends WM_NCHITTEST, because the mouse is in the title bar
+                        // draggable area, the result is HTCAPTION, so when the mouse is released,
+                        // Windows sends WM_NCLBUTTONUP, which is a non-client message, and it
+                        // will be ignored by Qt. As a consequence, QWidgetWindow can't receive a
+                        // mouse release message in the client area, so the grab remains, and other
+                        // widgets cannot receive mouse events.
+
+                        // Since we didn't watch the menu window, we cannot capture any mouse
+                        // press events sent by Windows, so we cannot solve this problem by
+                        // recording mouse events. Fortunately, we found that the main window will
+                        // receive a WM_NCMOUSEMOVE message immediately after the menu is closed, so
+                        // we just manually send a mouse release event when this message arrives and
+                        // set qt_button_down to null. Don't worry, when receiving WM_NCMOUSEMOVE,
+                        // there shouldn't be any control in the state of being grabbed.
+
+                        // In the native window, although QWidgetWindow handles the forwarded mouse
+                        // press event when the menu is closed, since the native title bar is not a
+                        // QWidget, no widget will be grabbed, and `qt_button_down` remains empty,
+                        // the above problems would not arise.
+
+                        m_delegate->resetQtGrabbedControl(m_host);
+
+                        // If the mouse moves from chrome buttons to other non-client areas, a
+                        // WM_MOUSELEAVE message should be sent.
+                        if (mouseLeaveBlocked) {
+                            emulateClientAreaMessage(hWnd, message, wParam, lParam,
+                                                     WM_NCMOUSELEAVE);
+                        }
+                    }
+                }
+
+                if (lastHitTestResult == WindowPart::ChromeButton) {
+                    if (message == WM_NCMOUSEMOVE) {
+                        // ### FIXME FIXME FIXME
+                        // ### FIXME: Calling DefWindowProc() here is really dangerous, investigate
+                        // how to avoid doing this.
+                        // ### FIXME FIXME FIXME
+                        *result = ::DefWindowProcW(hWnd, WM_NCMOUSEMOVE, wParam, lParam);
+                        emulateClientAreaMessage(hWnd, message, wParam, lParam);
+                        return true;
+                    }
+
+                    if (lastHitTestResultRaw == HTSYSMENU) {
+                        switch (message) {
+                            case WM_NCLBUTTONDOWN:
+                                if (iconButtonClickLevel == 0) {
+                                    // A message of WM_SYSCOMMAND with SC_MOUSEMENU will be sent by
+                                    // Windows, and the current control flow will be blocked by the
+                                    // menu while Windows will create and execute a new event loop
+                                    // until the menu returns
+                                    iconButtonClickTime = ::GetTickCount64();
+                                    *result = ::DefWindowProcW(hWnd, message, wParam, lParam);
+                                    iconButtonClickTime = 0;
+                                    if (iconButtonClickLevel & IconButtonTriggersClose) {
+                                        ::PostMessageW(hWnd, WM_SYSCOMMAND, SC_CLOSE, 0);
+                                    }
+                                    if (iconButtonClickLevel & IconButtonDoubleClicked) {
+                                        iconButtonClickLevel = 0;
+                                    }
+                                    // Otherwise, no need to reset `iconButtonClickLevel` if not to
+                                    // close, if it has value, there must be another incoming
+                                    // WM_NCLBUTTONDOWN
+                                } else {
+                                    iconButtonClickLevel = 0;
+                                }
+                                break;
+                            case WM_NCLBUTTONDBLCLK:
+                                // A message of WM_SYSCOMMAND with SC_CLOSE will be sent by Windows
+                                *result = ::DefWindowProcW(hWnd, message, wParam, lParam);
+                                break;
+                            default:
+                                *result = FALSE;
+                                emulateClientAreaMessage(hWnd, message, wParam, lParam);
+                                break;
+                        }
+                    } else {
+                        // According to MSDN, we should return non-zero for X button messages to
+                        // indicate we have handled these messages (due to historical reasons), for
+                        // all other messages we should return zero instead.
+                        *result =
+                            (((message >= WM_NCXBUTTONDOWN) && (message <= WM_NCXBUTTONDBLCLK))
+                                 ? TRUE
+                                 : FALSE);
+                        emulateClientAreaMessage(hWnd, message, wParam, lParam);
+                    }
+                    return true;
+                }
+                break;
+            }
+
+            case WM_NCMOUSELEAVE: {
+                const WindowPart currentWindowPart = lastHitTestResult;
+                if (currentWindowPart == WindowPart::ChromeButton) {
+                    // If we press on the chrome button and move mouse, Windows will take the
+                    // pressing area as HTCLIENT which maybe because of our former retransmission of
+                    // WM_NCLBUTTONDOWN, as a result, a WM_NCMOUSELEAVE will come immediately and a
+                    // lot of WM_MOUSEMOVE will come if we move the mouse, we should track the mouse
+                    // in advance. (May be redundant?)
+                    if (mouseLeaveBlocked) {
+                        mouseLeaveBlocked = false;
+                        requestForMouseLeaveMessage(hWnd, false);
+                    }
+                } else {
+                    if (mouseLeaveBlocked) {
+                        // The mouse is moving from the chrome button to other non-client area, we
+                        // should emulate a WM_MOUSELEAVE message to reset the button state.
+                        emulateClientAreaMessage(hWnd, message, wParam, lParam, WM_NCMOUSELEAVE);
+                    }
+
+                    if (currentWindowPart == WindowPart::Outside) {
+                        // Notice: we're not going to clear window part cache when the mouse leaves
+                        // window from client area, which means we will get previous window part as
+                        // HTCLIENT if the mouse leaves window from client area and enters window
+                        // from non-client area, but it has no bad effect.
+
+                        // Why do we need to call this function here?
+                        m_delegate->resetQtGrabbedControl(m_host);
+                    }
+                }
+                break;
+            }
+
+            default:
+                break;
+        }
+        return false;
+    }
+
+    bool Win32WindowContext::customWindowHandler(HWND hWnd, UINT message, WPARAM wParam,
+                                                 LPARAM lParam, LRESULT *result) {
+        Q_ASSERT(hWnd);
+        Q_ASSERT(result);
+        switch (message) {
+            case WM_NCHITTEST: {
+                // 鍘熺敓Win32绐楀彛鍙湁椤惰竟鏄湪绐楀彛鍐呴儴resize鐨勶紝鍏朵綑涓夎竟閮芥槸鍦ㄧ獥鍙?
+                // 澶栭儴杩涜resize鐨勶紝鍏跺師鐞嗘槸锛學S_THICKFRAME杩欎釜绐楀彛鏍峰紡浼氬湪绐?
+                // 鍙ｇ殑宸︺€佸彸鍜屽簳杈规坊鍔犱笁涓€忔槑鐨剅esize鍖哄煙锛岃繖涓変釜鍖哄煙鍦ㄦ甯哥姸鎬?
+                // 涓嬫槸瀹屽叏涓嶅彲瑙佺殑锛屽畠浠敱DWM璐熻矗缁樺埗鍜屾帶鍒躲€傝繖浜涘尯鍩熺殑瀹藉害绛変簬
+                // (SM_CXSIZEFRAME + SM_CXPADDEDBORDER)锛岄珮搴︾瓑浜?
+                // (SM_CYSIZEFRAME + SM_CXPADDEDBORDER)锛屽湪100%缂╂斁鏃讹紝鍧囩瓑
+                // 浜?鍍忕礌銆傚畠浠睘浜庣獥鍙ｅ尯鍩熺殑涓€閮ㄥ垎锛屼絾涓嶅睘浜庡鎴峰尯锛岃€屾槸灞炰簬闈炲
+                // 鎴峰尯锛屽洜姝etWindowRect鑾峰彇鐨勫尯鍩熶腑鏄寘鍚繖涓変釜resize鍖哄煙鐨勶紝
+                // 鑰孏etClientRect鑾峰彇鐨勫尯鍩熸槸涓嶅寘鍚畠浠殑銆傚綋鎶?
+                // DWMWA_EXTENDED_FRAME_BOUNDS浣滀负鍙傛暟璋冪敤
+                // DwmGetWindowAttribute鏃讹紝涔熻兘鑾峰彇鍒颁竴涓獥鍙ｅぇ灏忥紝杩欎釜澶у皬浠?
+                // 浜庡墠闈袱鑰呬箣闂达紝鏆傛椂涓嶇煡閬撹繖涓暟鎹殑鎰忎箟鍙婂叾浣滅敤銆傛垜浠湪
+                // WM_NCCALCSIZE娑堟伅鐨勫鐞嗕腑锛屽凡缁忔妸鏁翠釜绐楀彛閮借缃负瀹㈡埛鍖轰簡锛屼篃
+                // 灏辨槸璇达紝鎴戜滑鐨勭獥鍙ｅ凡缁忔病鏈夐潪瀹㈡埛鍖轰簡锛屽洜姝ら偅涓変釜閫忔槑鐨剅esize鍖?
+                // 鍩燂紝姝ゅ埢涔熷凡缁忔垚涓虹獥鍙ｅ鎴峰尯鐨勪竴閮ㄥ垎浜嗭紝浠庤€屽彉寰椾笉閫忔槑浜嗐€傛墍浠?
+                // 鐜板湪鐨剅esize锛岀湅璧锋潵鍍忔槸鍦ㄧ獥鍙ｅ唴閮╮esize锛屾槸鍥犱负鍘熸湰閫忔槑鐨勫湴鏂?
+                // 鐜板湪鍙樺緱涓嶉€忔槑浜嗭紝瀹為檯涓婏紝鍗曠函浠庤寖鍥翠笂鏉ョ湅锛岀幇鍦ㄦ垜浠瑀esize鐨勫湴鏂癸紝
+                // 灏辨槸鏅€氱獥鍙ｇ殑杈规澶栭儴锛岄偅涓変釜閫忔槑鍖哄煙鐨勮寖鍥淬€?
+                // 鍥犳锛屽鏋滄垜浠妸杈规瀹屽叏鍘绘帀锛堝氨鏄垜浠鍦ㄥ仛鐨勪簨鎯咃級锛宺esize灏?
+                // 浼氱湅璧锋潵鏄湪鍐呴儴杩涜锛岃繖涓棶棰橀€氳繃甯歌鏂规硶闈炲父闅句互瑙ｅ喅銆傛垜娴嬭瘯杩?
+                // QQ鍜岄拤閽夌殑绐楀彛锛屽畠浠殑绐楀彛灏辨槸鍦ㄥ閮╮esize锛屼絾瀹為檯涓婂畠浠槸閫氳繃
+                // 鎶婄獥鍙ｅ疄闄呯殑鍐呭锛屽祵鍏ュ埌涓€涓畬鍏ㄩ€忔槑鐨勪絾灏哄瑕佸ぇ涓€鍦堢殑绐楀彛涓疄鐜?
+                // 鐨勶紝铏界劧鐪嬭捣鏉ユ晥鏋滆繕涓嶉敊锛屼絾瀵逛簬姝ら」鐩€岃█锛屼唬鐮佸拰绐楀彛缁撴瀯杩囦簬澶?
+                // 鏉傦紝鍥犳鎴戞病鏈夐噰鐢ㄦ鏂规銆傜劧鑰岋紝瀵逛簬鍏蜂綋鐨勮蒋浠堕」鐩€岃█锛屽叾鍋氭硶涔?
+                // 涓嶅け涓轰竴涓紭绉€鐨勮В鍐虫柟妗堬紝姣曠珶鍏跺湪澶у鏁版潯浠朵笅鐨勮〃鐜伴兘杩樺彲浠ャ€?
+                //
+                // 鍜?.x鐨勫仛娉曚笉鍚岋紝鐜板湪鐨?.x閫夋嫨浜嗕繚鐣欑獥鍙ｄ笁杈癸紝鍘婚櫎鏁翠釜绐楀彛椤堕儴锛?
+                // 濂藉鏄繚鐣欎簡绯荤粺鐨勫師鐢熻竟妗嗭紝澶栬杈冨ソ锛屼笖涓庣郴缁熺粨鍚堢揣瀵嗭紝鑰屼笖resize
+                // 鐨勮〃鐜颁篃鏈夊緢澶ф敼鍠勶紝缂虹偣鏄渶瑕佽嚜琛岀粯鍒堕《閮ㄨ竟妗嗙嚎銆傚師鏈互涓哄彧鑳藉儚
+                // Windows Terminal閭ｆ牱鍦╓M_PAINT閲屾悶榛戦瓟娉曪紝浣嗗悗鏉ュ彂鐜帮紝鍏跺疄鍙?
+                // 瑕侀鑹茬浉杩戯紝鎴戜滑鑷缁樺埗涓€鏍瑰疄绾夸篃鍑犱箮鑳戒互鍋囦贡鐪燂紝鑰屼笖杩欐牱涔熶笉浼?
+                // 鐮村潖Qt鑷繁鐨勭粯鍒剁郴缁燂紝鑳藉仛鍒颁笉渚濊禆榛戦瓟娉曞氨鑳藉疄鐜板儚Windows Terminal
+                // 閭ｆ牱澶栬鍜屽姛鑳介兘姣旇緝瀹岀編鐨勮嚜瀹氫箟杈规銆?
+
+                // A normal Win32 window can be resized outside of it. Here is the
+                // reason: the WS_THICKFRAME window style will cause a window has three
+                // transparent areas beside the window's left, right and bottom
+                // edge. Their width or height is eight pixels if the window is not
+                // scaled. In most cases, they are totally invisible. It's DWM's
+                // responsibility to draw and control them. They exist to let the
+                // user resize the window, visually outside of it. They are in the
+                // window area, but not the client area, so they are in the
+                // non-client area actually. But we have turned the whole window
+                // area into client area in WM_NCCALCSIZE, so the three transparent
+                // resize areas also become a part of the client area and thus they
+                // become visible. When we resize the window, it looks like we are
+                // resizing inside of it, however, that's because the transparent
+                // resize areas are visible now, we ARE resizing outside of the
+                // window actually. But I don't know how to make them become
+                // transparent again without breaking the frame shadow drawn by DWM.
+                // If you really want to solve it, you can try to embed your window
+                // into a larger transparent window and draw the frame shadow
+                // yourself. As what we have said in WM_NCCALCSIZE, you can only
+                // remove the top area of the window, this will let us be able to
+                // resize outside of the window and don't need much process in this
+                // message, it looks like a perfect plan, however, the top border is
+                // missing due to the whole top area is removed, and it's very hard
+                // to bring it back because we have to use a trick in WM_PAINT
+                // (learned from Windows Terminal), but no matter what we do in
+                // WM_PAINT, it will always break the backing store mechanism of Qt,
+                // so actually we can't do it. And it's very difficult to do such
+                // things in NativeEventFilters as well. What's worse, if we really
+                // do this, the four window borders will become white and they look
+                // horrible in dark mode. This solution only supports Windows 10
+                // because the border width on Win10 is only one pixel, however it's
+                // eight pixels on Windows 7 so preserving the three window borders
+                // looks terrible on old systems.
+                //
+                // Unlike the 1.x code, we choose to preserve the three edges of the
+                // window in 2.x, and get rid of the whole top part of the window.
+                // There are quite some advantages such as the appearance looks much
+                // better and due to we have the original system window frame, our
+                // window can behave just like a normal Win32 window even if we now
+                // doesn't have a title bar at all. Most importantly, the flicker and
+                // jitter during window resizing is totally gone now. The disadvantage
+                // is we have to draw a top frame border ourselves. Previously I thought
+                // we have to do the black magic in WM_PAINT just like what Windows
+                // Terminal does, however, later I found that if we choose a proper
+                // color, our homemade top border can almost have exactly the same
+                // appearance with the system's one.
+                [[maybe_unused]] const auto &hitTestRecorder = qScopeGuard([this, result]() {
+                    lastHitTestResultRaw = int(*result);
+                    lastHitTestResult = getHitWindowPart(lastHitTestResultRaw);
+                });
+
+                POINT nativeGlobalPos{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                POINT nativeLocalPos = nativeGlobalPos;
+                ::ScreenToClient(hWnd, &nativeLocalPos);
+                RECT windowRect{0, 0, 0, 0};
+                ::GetWindowRect(hWnd, &windowRect);
+                POINT nativeWindowPos{
+                    nativeGlobalPos.x - windowRect.left,
+                    nativeGlobalPos.y - windowRect.top,
+                };
+                const int windowWidth = RECT_WIDTH(windowRect);
+                const int windowHeight = RECT_HEIGHT(windowRect);
+
+                RECT clientRect{0, 0, 0, 0};
+                ::GetClientRect(hWnd, &clientRect);
+                auto clientWidth = RECT_WIDTH(clientRect);
+                auto clientHeight = RECT_HEIGHT(clientRect);
+
+                QPoint qtScenePos = QHighDpi::fromNativeLocalPosition(point2qpoint(nativeLocalPos),
+                                                                      m_windowHandle.data());
+
+                const int configuredEdgeInset =
+                    windowAttribute(QStringLiteral("qrounded-resize-edge-inset")).toInt();
+                const int configuredCornerInset =
+                    windowAttribute(QStringLiteral("qrounded-resize-corner-inset")).toInt();
+                const int visibleEdgeInset =
+                    qBound(1, configuredEdgeInset > 0 ? configuredEdgeInset : static_cast<int>(getResizeBorderThickness(hWnd)), 32);
+                const int cornerVisibleEdgeInset =
+                    qBound(visibleEdgeInset,
+                           configuredCornerInset > 0 ? configuredCornerInset : visibleEdgeInset,
+                           64);
+
+                bool isFixedWidth = isHostWidthFixed();
+                bool isFixedHeight = isHostHeightFixed();
+                bool isFixedSize = isHostSizeFixed();
+                bool isInLeftBorder = nativeWindowPos.x >= 0 && nativeWindowPos.x <= visibleEdgeInset;
+                bool isInTopBorder = nativeWindowPos.y >= 0 && nativeWindowPos.y <= visibleEdgeInset;
+                bool isInRightBorder =
+                    nativeWindowPos.x >= windowWidth - visibleEdgeInset - 1 &&
+                    nativeWindowPos.x <= windowWidth;
+                bool isInBottomBorder =
+                    nativeWindowPos.y >= windowHeight - visibleEdgeInset - 1 &&
+                    nativeWindowPos.y <= windowHeight;
+                bool isInLeftCornerBorder =
+                    nativeWindowPos.x >= 0 && nativeWindowPos.x <= cornerVisibleEdgeInset;
+                bool isInTopCornerBorder =
+                    nativeWindowPos.y >= 0 && nativeWindowPos.y <= cornerVisibleEdgeInset;
+                bool isInRightCornerBorder =
+                    nativeWindowPos.x >= windowWidth - cornerVisibleEdgeInset - 2 &&
+                    nativeWindowPos.x <= windowWidth;
+                bool isInBottomCornerBorder =
+                    nativeWindowPos.y >= windowHeight - cornerVisibleEdgeInset - 2 &&
+                    nativeWindowPos.y <= windowHeight;
+                bool isInTitleBar = isInTitleBarDraggableArea(qtScenePos);
+                WindowAgentBase::SystemButton sysButtonType = WindowAgentBase::Unknown;
+                bool isInCaptionButtons = isInSystemButtons(qtScenePos, &sysButtonType);
+                static constexpr bool dontOverrideCursor = false; // ### TODO
+
+                if (isInCaptionButtons) {
+                    // Firstly, we set the hit test result to a default value to be able to detect
+                    // whether we have changed it or not afterwards.
+                    *result = HTNOWHERE;
+                    // Even if the mouse is inside the chrome button area now, we should still allow
+                    // the user to be able to resize the window with the top or right window border,
+                    // this is also the normal behavior of a native Win32 window (but only when the
+                    // window is not maximized/fullscreen/minimized, of course).
+                    if (isWindowNoState(hWnd)) {
+                        bool isTop = isInTopBorder || isInTopCornerBorder;
+                        bool isLeft = isInLeftBorder || isInLeftCornerBorder;
+                        bool isRight = isInRightBorder || isInRightCornerBorder;
+                        bool isTopLeftCorner = isInTopCornerBorder && isInLeftCornerBorder;
+                        bool isTopRightCorner = isInTopCornerBorder && isInRightCornerBorder;
+                        if (isTop || isLeft || isRight) {
+                            if (isFixedSize || dontOverrideCursor) {
+                                // The user doesn't want the window to be resized, so we tell
+                                // Windows we are in the client area so that the controls beneath
+                                // the mouse cursor can still be hovered or clicked.
+                                *result = isInTitleBar ? HTCAPTION : HTCLIENT;
+                            } else {
+                                if (isTop) {
+                                    if (isTopLeftCorner) {
+                                        if (isFixedWidth) {
+                                            *result = HTTOP;
+                                        } else if (isFixedHeight) {
+                                            *result = HTLEFT;
+                                        } else {
+                                            *result = HTTOPLEFT;
+                                        }
+                                    } else if (isTopRightCorner) {
+                                        if (isFixedWidth) {
+                                            *result = HTTOP;
+                                        } else if (isFixedHeight) {
+                                            *result = HTRIGHT;
+                                        } else {
+                                            *result = HTTOPRIGHT;
+                                        }
+                                    } else {
+                                        *result = isFixedHeight ? HTBORDER : HTTOP;
+                                    }
+                                } else {
+                                    if (isFixedWidth) {
+                                        *result = HTBORDER;
+                                    } else {
+                                        *result = isLeft ? HTLEFT : HTRIGHT;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (*result == HTNOWHERE) {
+                        // OK, we are now really inside one of the chrome buttons, tell Windows the
+                        // exact role of our button. The Snap Layout feature introduced in Windows
+                        // 11 won't work without this.
+                        switch (sysButtonType) {
+                            case WindowAgentBase::WindowIcon:
+                                *result = HTSYSMENU;
+                                break;
+                            case WindowAgentBase::Help:
+                                *result = HTHELP;
+                                break;
+                            case WindowAgentBase::Minimize:
+                                *result = HTREDUCE;
+                                break;
+                            case WindowAgentBase::Maximize:
+                                *result = HTZOOM;
+                                break;
+                            case WindowAgentBase::Close:
+                                *result = HTCLOSE;
+                                break;
+                            default:
+                                // unreachable
+                                break;
+                        }
+                    }
+                    if (*result == HTNOWHERE) {
+                        // OK, it seems we are not inside the window resize area, nor inside the
+                        // chrome buttons, tell Windows we are in the client area to let Qt handle
+                        // this event.
+                        *result = HTCLIENT;
+                    }
+                    return true;
+                }
+                // OK, we are not inside any chrome buttons, try to find out which part of the
+                // window are we hitting.
+
+                bool max = isMaximized(hWnd);
+                bool full = isFullScreen(hWnd);
+                // A maximized custom-frame window can have the same rectangle as the monitor on
+                // Win10. Treat fullscreen as exclusive from IsZoomed here, otherwise maximized
+                // title-bar hit testing is misclassified as client area and caption drag restore
+                // never receives WM_NCLBUTTONDOWN.
+                bool realFull = full && !max;
+
+                if (isSystemBorderEnabled()) {
+                    // This will handle the left, right and bottom parts of the frame
+                    // because we didn't change them.
+                    LRESULT originalHitTestResult = ::DefWindowProcW(hWnd, WM_NCHITTEST, 0, lParam);
+                    originalHitTestResult = trimResizeHitTest(nativeWindowPos, windowWidth, windowHeight,
+                                                             originalHitTestResult, visibleEdgeInset,
+                                                             cornerVisibleEdgeInset);
+                    if (originalHitTestResult != HTCLIENT) {
+                        // Even if the window is not resizable, we still can't return HTCLIENT here
+                        // because when we enter this code path, it means the mouse cursor is
+                        // outside the window, that is, the three transparent window resize area.
+                        // Returning HTCLIENT will confuse Windows, we can't put our controls there
+                        // anyway.
+                        *result = HTNOWHERE; // Make sure we can know we don't set any value
+                                             // explicitly later.
+                        if (originalHitTestResult == HTCAPTION) {
+                        } else if (isFixedSize || dontOverrideCursor) {
+                            *result = HTBORDER;
+                        } else if (isFixedWidth || isFixedHeight) {
+                            if (originalHitTestResult == HTTOPLEFT) {
+                                if (isFixedWidth) {
+                                    *result = HTTOP;
+                                } else {
+                                    *result = HTLEFT;
+                                }
+                            } else if (originalHitTestResult == HTTOPRIGHT) {
+                                if (isFixedWidth) {
+                                    *result = HTTOP;
+                                } else {
+                                    *result = HTRIGHT;
+                                }
+                            } else if (originalHitTestResult == HTBOTTOMRIGHT) {
+                                if (isFixedWidth) {
+                                    *result = HTBOTTOM;
+                                } else {
+                                    *result = HTRIGHT;
+                                }
+                            } else if (originalHitTestResult == HTBOTTOMLEFT) {
+                                if (isFixedWidth) {
+                                    *result = HTBOTTOM;
+                                } else {
+                                    *result = HTLEFT;
+                                }
+                            } else if (originalHitTestResult == HTLEFT ||
+                                       originalHitTestResult == HTRIGHT) {
+                                if (isFixedWidth) {
+                                    *result = HTBORDER;
+                                }
+                            } else if (originalHitTestResult == HTTOP ||
+                                       originalHitTestResult == HTBOTTOM) {
+                                if (isFixedHeight) {
+                                    *result = HTBORDER;
+                                }
+                            }
+                        }
+                        if (*result == HTNOWHERE) {
+                            *result = originalHitTestResult;
+                        }
+                        return true;
+                    }
+                    if (realFull) {
+                        *result = HTCLIENT;
+                        return true;
+                    }
+                    if (max) {
+                        *result = isInTitleBar ? HTCAPTION : HTCLIENT;
+                        return true;
+                    }
+                    // At this point, we know that the cursor is inside the client area,
+                    // so it has to be either the little border at the top of our custom
+                    // title bar or the drag bar. Apparently, it must be the drag bar or
+                    // the little border at the top which the user can use to move or
+                    // resize the window.
+                    if (isInTopBorder) {
+                        // Return HTCLIENT instead of HTBORDER here, because the mouse is
+                        // inside our homemade title bar now, return HTCLIENT to let our
+                        // title bar can still capture mouse events.
+                        *result = [&]() {
+                            if (isFixedSize || isFixedHeight || dontOverrideCursor ||
+                                (isFixedWidth && (isInLeftBorder || isInRightBorder))) {
+                                if (isInTitleBar) {
+                                    return HTCAPTION;
+                                } else {
+                                    return HTCLIENT;
+                                }
+                            } else {
+                                return HTTOP;
+                            }
+                        }();
+                        return true;
+                    }
+                    if (isInTitleBar) {
+                        *result = HTCAPTION;
+                        return true;
+                    }
+                    *result = HTCLIENT;
+                    return true;
+                } else {
+                    if (realFull) {
+                        *result = HTCLIENT;
+                        return true;
+                    }
+                    if (max || isFixedSize || dontOverrideCursor) {
+                        *result = isInTitleBar ? HTCAPTION : HTCLIENT;
+                        return true;
+                    }
+                    if (isFixedWidth || isFixedHeight) {
+                        if (isInLeftBorder && isInTopBorder) {
+                            if (isFixedWidth) {
+                                *result = HTTOP;
+                            } else {
+                                *result = HTLEFT;
+                            }
+                        } else if (isInRightBorder && isInTopBorder) {
+                            if (isFixedWidth) {
+                                *result = HTTOP;
+                            } else {
+                                *result = HTRIGHT;
+                            }
+                        } else if (isInRightCornerBorder && isInBottomCornerBorder) {
+                            if (isFixedWidth) {
+                                *result = HTBOTTOM;
+                            } else {
+                                *result = HTRIGHT;
+                            }
+                        } else if (isInLeftBorder && isInBottomBorder) {
+                            if (isFixedWidth) {
+                                *result = HTBOTTOM;
+                            } else {
+                                *result = HTLEFT;
+                            }
+                        } else if (isInLeftBorder || isInRightBorder) {
+                            if (isFixedWidth) {
+                                *result = HTCLIENT;
+                            } else {
+                                *result = isInLeftBorder ? HTLEFT : HTRIGHT;
+                            }
+                        } else if (isInTopBorder || isInBottomBorder) {
+                            if (isFixedHeight) {
+                                *result = HTCLIENT;
+                            } else {
+                                *result = isInTopBorder ? HTTOP : HTBOTTOM;
+                            }
+                        } else {
+                            *result = HTCLIENT;
+                        }
+                        return true;
+                    } else {
+                        if (isInTopBorder || (isInTopCornerBorder && (isInLeftCornerBorder || isInRightCornerBorder))) {
+                            if (isInLeftCornerBorder && isInTopCornerBorder) {
+                                *result = HTTOPLEFT;
+                                return true;
+                            }
+                            if (isInRightCornerBorder && isInTopCornerBorder) {
+                                *result = HTTOPRIGHT;
+                                return true;
+                            }
+                            *result = HTTOP;
+                            return true;
+                        }
+                        if (isInBottomBorder || (isInBottomCornerBorder && (isInLeftCornerBorder || isInRightCornerBorder))) {
+                            if (isInLeftCornerBorder && isInBottomCornerBorder) {
+                                *result = HTBOTTOMLEFT;
+                                return true;
+                            }
+                            if (isInRightCornerBorder && isInBottomCornerBorder) {
+                                *result = HTBOTTOMRIGHT;
+                                return true;
+                            }
+                            *result = HTBOTTOM;
+                            return true;
+                        }
+                        if (isInLeftBorder) {
+                            *result = HTLEFT;
+                            return true;
+                        }
+                        if (isInRightBorder) {
+                            *result = HTRIGHT;
+                            return true;
+                        }
+                    }
+                    if (isInTitleBar) {
+                        *result = HTCAPTION;
+                        return true;
+                    }
+                    *result = HTCLIENT;
+                    return true;
+                }
+            }
+
+
+            case WM_WINDOWPOSCHANGING: {
+                // ### FIXME: How does this problem happen and why is it solved?
+                // When toggling the "Show theme color in title bar and window border" setting in
+                // Windows Settings, or calling `DrawMenuBar()`, Windows sends a message of
+                // WM_WINDOWPOSCHANGING with flags 0x37. If we do not process this message,
+                // the client area as a whole will shift to the left, which looks very abnormal if
+                // we don't repaint it. This exception disappears if we add SWP_NOCOPYBITS flag.
+                // But I don't know what caused the problem, or why this would solve it.
+                static constexpr const auto kBadWindowPosFlag =
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED;
+                const auto windowPos = reinterpret_cast<LPWINDOWPOS>(lParam);
+                if (windowPos->flags == kBadWindowPosFlag) {
+                    windowPos->flags |= SWP_NOCOPYBITS;
+                }
+                break;
+            }
+
+            case WM_SHOWWINDOW: {
+                if (!wParam || !isWindowNoState(hWnd) || isFullScreen(hWnd)) {
+                    break;
+                }
+                // The following code is totally a workaround. We should remove it as soon as possible.
+                // For windows painted by D3D (such as QtQuick windows), when it is first shown, there
+                // will always be a strange white line on the top, and it will always disappear when we
+                // resize the window. It seems to be some kind of leftover of the original window frame.
+                // So here we manually resize the window and restore it immediately to workaround this
+                // issue. Due to we only enlarge the window for 1x1 and restore it immediately, the user
+                // won't see this change in reality, but the strange white line is indeed gone.
+                // Anyway, this is still a non-sense workaround, no one can guarantee it will always work
+                // and won't break anything.
+                RECT windowRect{};
+                ::GetWindowRect(hWnd, &windowRect);
+                static constexpr const auto swpFlags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+                                                       SWP_FRAMECHANGED | SWP_NOOWNERZORDER;
+                ::SetWindowPos(hWnd, nullptr, 0, 0, RECT_WIDTH(windowRect) + 1,
+                               RECT_HEIGHT(windowRect) + 1, swpFlags);
+                ::SetWindowPos(hWnd, nullptr, 0, 0, RECT_WIDTH(windowRect), RECT_HEIGHT(windowRect),
+                               swpFlags);
+                break;
+            }
+
+            default:
+                break;
+        }
+
+        if (!isSystemBorderEnabled()) {
+            switch (message) {
+                case WM_NCUAHDRAWCAPTION:
+                case WM_NCUAHDRAWFRAME: {
+                    // These undocumented messages are sent to draw themed window
+                    // borders. Block them to prevent drawing borders over the client
+                    // area.
+                    *result = FALSE;
+                    return true;
+                }
+                case WM_NCPAINT: {
+                    // 杈规闃村奖澶勪簬闈炲鎴峰尯鐨勮寖鍥达紝鍥犳濡傛灉鐩存帴闃绘闈炲鎴峰尯鐨勭粯鍒讹紝浼氬鑷磋竟妗嗛槾褰变涪澶?
+
+                    if (!isDwmCompositionEnabled()) {
+                        // Only block WM_NCPAINT when DWM composition is disabled. If
+                        // it's blocked when DWM composition is enabled, the frame
+                        // shadow won't be drawn.
+                        *result = FALSE;
+                        return true;
+                    } else {
+                        break;
+                    }
+                }
+                case WM_NCACTIVATE: {
+                    if (isDwmCompositionEnabled()) {
+                        // DefWindowProc won't repaint the window border if lParam (normally a HRGN)
+                        // is -1. See the following link's "lParam" section:
+                        // https://docs.microsoft.com/en-us/windows/win32/winmsg/wm-ncactivate
+                        // Don't use "*result = 0" here, otherwise the window won't respond to the
+                        // window activation state change.
+                        *result = ::DefWindowProcW(hWnd, WM_NCACTIVATE, wParam, -1);
+                    } else {
+                        *result = TRUE;
+                    }
+                    return true;
+                }
+                case WM_SETICON:
+                case WM_SETTEXT: {
+                    // Disable painting while these messages are handled to prevent them
+                    // from drawing a window caption over the client area.
+                    const auto oldStyle = static_cast<DWORD>(::GetWindowLongPtrW(hWnd, GWL_STYLE));
+                    // Prevent Windows from drawing the default title bar by temporarily
+                    // toggling the WS_VISIBLE style.
+                    const DWORD newStyle = (oldStyle & ~WS_VISIBLE);
+                    ::SetWindowLongPtrW(hWnd, GWL_STYLE, static_cast<LONG_PTR>(newStyle));
+                    triggerFrameChange(hWnd);
+                    const LRESULT originalResult = ::DefWindowProcW(hWnd, message, wParam, lParam);
+                    ::SetWindowLongPtrW(hWnd, GWL_STYLE, static_cast<LONG_PTR>(oldStyle));
+                    triggerFrameChange(hWnd);
+                    *result = originalResult;
+                    return true;
+                }
+                default:
+                    break;
+            }
+        }
+        return false;
+    }
+
+    bool Win32WindowContext::nonClientCalcSizeHandler(HWND hWnd, UINT message, WPARAM wParam,
+                                                      LPARAM lParam, LRESULT *result) {
+        Q_ASSERT(hWnd);
+        Q_ASSERT(result);
+
+        Q_UNUSED(message)
+        Q_UNUSED(this)
+
+        // Windows鏄牴鎹繖涓秷鎭殑杩斿洖鍊兼潵璁剧疆绐楀彛鐨勫鎴峰尯锛堢獥鍙ｄ腑鐪熸鏄剧ず鐨勫唴瀹癸級
+        // 鍜岄潪瀹㈡埛鍖猴紙鏍囬鏍忋€佺獥鍙ｈ竟妗嗐€佽彍鍗曟爮鍜岀姸鎬佹爮绛塛indows绯荤粺鑷鎻愪緵鐨勯儴鍒?
+        // 锛屼笉杩囧浜嶲t鏉ヨ锛岄櫎浜嗘爣棰樻爮鍜岀獥鍙ｈ竟妗嗭紝闈炲鎴峰尯鍩烘湰涔熼兘鏄嚜缁樼殑锛夌殑鑼?
+        // 鍥寸殑锛宭Param閲屽瓨鏀剧殑灏辨槸鏂板鎴峰尯鐨勫嚑浣曞尯鍩燂紝榛樿鏄暣涓獥鍙ｇ殑澶у皬锛屾甯?
+        // 鐨勭▼搴忛渶瑕佷慨鏀硅繖涓弬鏁帮紝鍛婄煡绯荤粺绐楀彛鐨勫鎴峰尯鍜岄潪瀹㈡埛鍖虹殑鑼冨洿锛堜竴鑸潵璇村彲
+        // 浠ュ畬鍏ㄤ氦缁橶indows锛岃鍏惰嚜琛屽鐞嗭紝浣跨敤榛樿鐨勫鎴峰尯鍜岄潪瀹㈡埛鍖猴級锛屽洜姝ゅ鏋?
+        // 鎴戜滑涓嶄慨鏀筶Param锛屽氨鍙互浣垮鎴峰尯鍏呮弧鏁翠釜绐楀彛锛屼粠鑰屽幓鎺夋爣棰樻爮鍜岀獥鍙ｈ竟妗?
+        // 锛堝洜涓鸿繖浜涗笢瑗块兘琚鎴峰尯缁欑洊浣忎簡銆備絾杈规闃村奖涔熶細鍥犳鑰屼涪澶憋紝涓嶈繃鎴戜滑浼氫娇
+        // 鐢ㄥ叾浠栨柟寮忓皢鍏跺甫鍥烇紝璇峰弬鑰冨叾浠栨秷鎭殑澶勭悊锛屾澶勪笉杩囧鎻愬強锛夈€備絾鏈変釜鎯呭喌瑕?
+        // 鐗瑰埆娉ㄦ剰锛岄偅灏辨槸绐楀彛鏈€澶у寲鍚庯紝绐楀彛鐨勫疄闄呭昂瀵镐細姣斿睆骞曠殑灏哄澶т竴鐐癸紝浠庤€屼娇
+        // 鐢ㄦ埛鐪嬩笉鍒扮獥鍙ｇ殑杈圭晫锛岃繖鏍风敤鎴峰氨涓嶈兘鍦ㄧ獥鍙ｆ渶澶у寲鍚庤皟鏁寸獥鍙ｇ殑澶у皬浜嗭紙铏界劧
+        // 杩欎釜鍋氭硶鍚捣鏉ョ壒鍒鎬紝浣哤indows纭疄灏辨槸杩欐牱鍋氱殑锛夛紝鍥犳濡傛灉鎴戜滑瑕佽嚜琛?
+        // 澶勭悊绐楀彛鐨勯潪瀹㈡埛鍖猴紝灏辫鍦ㄧ獥鍙ｆ渶澶у寲鍚庯紝灏嗙獥鍙ｈ竟妗嗙殑瀹藉害鍜岄珮搴︼紙涓€鑸槸鐩?
+        // 绛夌殑锛変粠瀹㈡埛鍖鸿鍓帀锛屽惁鍒欐垜浠獥鍙ｆ墍鏄剧ず鐨勫唴瀹瑰氨浼氳秴鍑哄睆骞曡竟鐣岋紝鏄剧ず涓嶅叏銆?
+        // 濡傛灉鐢ㄦ埛寮€鍚簡浠诲姟鏍忚嚜鍔ㄩ殣钘忥紝鍦ㄧ獥鍙ｆ渶澶у寲鍚庯紝杩樿鑰冭檻浠诲姟鏍忕殑浣嶇疆銆傚洜涓?
+        // 濡傛灉绐楀彛鏈€澶у寲鍚庯紝鍏跺昂瀵稿拰灞忓箷灏哄鐩哥瓑锛堝洜涓轰换鍔℃爮闅愯棌浜嗭紝鎵€浠ョ獥鍙ｆ渶澶у寲
+        // 鍚庡叾瀹炴槸鍏呮弧浜嗘暣涓睆骞曪紝鍙樼浉鐨勫叏灞忎簡锛夛紝Windows浼氳涓虹獥鍙ｅ凡缁忚繘鍏ュ叏灞忕殑
+        // 鐘舵€侊紝浠庤€屽鑷磋嚜鍔ㄩ殣钘忕殑浠诲姟鏍忔棤娉曞脊鍑恒€傝閬垮厤杩欎釜鐘跺喌锛屽氨瑕佷娇绐楀彛鐨勫昂瀵?
+        // 灏忎簬灞忓箷灏哄銆傛垜涓嬮潰鐨勫仛娉曞弬鑰冧簡鐏嫄銆丆hromium鍜學indows Terminal
+        // 濡傛灉娌℃湁寮€鍚换鍔℃爮鑷姩闅愯棌锛屾槸涓嶅瓨鍦ㄨ繖涓棶棰樼殑锛屾墍浠ヨ鍏堣繘琛屽垽鏂€?
+        // 涓€鑸儏鍐典笅锛?result璁剧疆涓?锛堢浉褰撲簬DefWindowProc鐨勮繑鍥炲€间负0锛夊氨鍙互浜嗭紝
+        // 鏍规嵁MSDN鐨勮娉曪紝杩斿洖0鎰忎负姝ゆ秷鎭凡缁忚绋嬪簭鑷澶勭悊浜嗭紝璁￤indows璺宠繃姝ゆ秷
+        // 鎭紝鍚﹀垯Windows浼氭坊鍔犲姝ゆ秷鎭殑榛樿澶勭悊锛屽浜庡綋鍓嶈繖涓秷鎭€岃█锛屽氨鎰忓懗鐫€
+        // 鏍囬鏍忓拰绐楀彛杈规鍙堜細鍥炴潵锛岃繖褰撶劧涓嶆槸鎴戜滑鎯宠鐨勭粨鏋溿€傛牴鎹甅SDN锛屽綋wParam
+        // 涓篎ALSE鏃讹紝鍙兘杩斿洖0锛屼絾褰撳叾涓篢RUE鏃讹紝鍙互杩斿洖0锛屼篃鍙互杩斿洖涓€涓猈VR_甯?
+        // 閲忋€傛牴鎹瓹hromium鐨勬敞閲婏紝褰撳瓨鍦ㄩ潪瀹㈡埛鍖烘椂锛屽鏋滆繑鍥濿VR_REDRAW浼氬鑷村瓙
+        // 绐楀彛/瀛愭帶浠跺嚭鐜板鎬殑bug锛堣嚜缁樻帶浠堕敊浣嶏級锛屽苟涓擫ucas鍦╓indows 10
+        // 涓婃垚鍔熷鐜帮紝璇存槑杩欎釜bug鑷充粖閮芥病鏈夎В鍐炽€傛垜鏌ラ槄浜嗗ぇ閲忚祫鏂欙紝鍙戠幇鍞竴鐨勮В鍐?
+        // 鏂规灏辨槸杩斿洖0銆備絾濡傛灉涓嶅瓨鍦ㄩ潪瀹㈡埛鍖猴紝涓攚Param涓篢RUE锛屾渶濂借繑鍥?
+        // WVR_REDRAW锛屽惁鍒欑獥鍙ｅ湪璋冩暣澶у皬鍙兘浼氫骇鐢熶弗閲嶇殑闂儊鐜拌薄銆?
+        // 铏界劧瀵瑰ぇ澶氭暟娑堟伅鏉ヨ锛岃繑鍥?閮戒唬琛ㄨWindows蹇界暐姝ゆ秷鎭紝浣嗗疄闄呬笂涓嶅悓娑堟伅
+        // 鑳芥帴鍙楃殑杩斿洖鍊兼槸涓嶄竴鏍风殑锛岃娉ㄦ剰鑷鏌ラ槄MSDN銆?
+
+        // Sent when the size and position of a window's client area must be
+        // calculated. By processing this message, an application can
+        // control the content of the window's client area when the size or
+        // position of the window changes. If wParam is TRUE, lParam points
+        // to an NCCALCSIZE_PARAMS structure that contains information an
+        // application can use to calculate the new size and position of the
+        // client rectangle. If wParam is FALSE, lParam points to a RECT
+        // structure. On entry, the structure contains the proposed window
+        // rectangle for the window. On exit, the structure should contain
+        // the screen coordinates of the corresponding window client area.
+        // The client area is the window's content area, the non-client area
+        // is the area which is provided by the system, such as the title
+        // bar, the four window borders, the frame shadow, the menu bar, the
+        // status bar, the scroll bar, etc. But for Qt, it draws most of the
+        // window area (client + non-client) itself. We now know that the
+        // title bar and the window frame is in the non-client area, and we
+        // can set the scope of the client area in this message, so we can
+        // remove the title bar and the window frame by let the non-client
+        // area be covered by the client area (because we can't really get
+        // rid of the non-client area, it will always be there, all we can
+        // do is to hide it) , which means we should let the client area's
+        // size the same with the whole window's size. So there is no room
+        // for the non-client area and then the user won't be able to see it
+        // again. But how to achieve this? Very easy, just leave lParam (the
+        // re-calculated client area) untouched. But of course you can
+        // modify lParam, then the non-client area will be seen and the
+        // window borders and the window frame will show up. However, things
+        // are quite different when you try to modify the top margin of the
+        // client area. DWM will always draw the whole title bar no matter
+        // what margin value you set for the top, unless you don't modify it
+        // and remove the whole top area (the title bar + the one pixel
+        // height window border). This can be confirmed in Windows
+        // Terminal's source code, you can also try yourself to verify
+        // it. So things will become quite complicated if you want to
+        // preserve the four window borders.
+
+        // If `wParam` is `FALSE`, `lParam` points to a `RECT` that contains
+        // the proposed window rectangle for our window. During our
+        // processing of the `WM_NCCALCSIZE` message, we are expected to
+        // modify the `RECT` that `lParam` points to, so that its value upon
+        // our return is the new client area. We must return 0 if `wParam`
+        // is `FALSE`.
+        // If `wParam` is `TRUE`, `lParam` points to a `NCCALCSIZE_PARAMS`
+        // struct. This struct contains an array of 3 `RECT`s, the first of
+        // which has the exact same meaning as the `RECT` that is pointed to
+        // by `lParam` when `wParam` is `FALSE`. The remaining `RECT`s, in
+        // conjunction with our return value, can
+        // be used to specify portions of the source and destination window
+        // rectangles that are valid and should be preserved. We opt not to
+        // implement an elaborate client-area preservation technique, and
+        // simply return 0, which means "preserve the entire old client area
+        // and align it with the upper-left corner of our new client area".
+
+        const auto clientRect = wParam ? &(reinterpret_cast<LPNCCALCSIZE_PARAMS>(lParam))->rgrc[0]
+                                       : reinterpret_cast<LPRECT>(lParam);
+        // This is a workaround for the resize flicker when the window is painting by D3D or Vulkan.
+        // (OpenGL doesn't flicker at all so we skip it to avoid strange things from happening)
+        // According to my local experiments, it can greatly reduce the resize flicker if you disable
+        // QtQuick's V-Sync. I tested the same binary on 60Hz/120Hz/144Hz/240Hz monitors, and the
+        // conclusion is: for monitors whose refresh rate is greater than 60Hz, the flicker can be
+        // greatly reduced but cannot be totally gone, for monitors whose refresh rate is equal to
+        // or less than 60Hz, the flicker is totally gone.
+        // NOTE: The application's V-Sync MUST be DISABLED to let this trick work!
+        [[maybe_unused]] const auto &flickerReducer = qScopeGuard([this]() {
+            // The user might doesn't want this, allow disable it.
+            static const bool disableThis = qEnvironmentVariableIntValue("QWK_DISABLE_FLICKER_WORKAROUND");
+            if (disableThis) {
+                return;
+            }
+            // When we receive this message, it means the window size has changed
+            // already, and it seems this message always come before any client
+            // area size notifications (eg. WM_WINDOWPOSCHANGED and WM_SIZE). Let
+            // D3D/VK paint immediately to let user see the latest result as soon
+            // as possible.
+            const auto &isTargetSurface = [](const QSurface::SurfaceType st) {
+                return st != QSurface::RasterSurface && st != QSurface::OpenGLSurface &&
+                       st != QSurface::RasterGLSurface && st != QSurface::OpenVGSurface;
+            };
+            if (m_windowHandle && isTargetSurface(m_windowHandle->surfaceType()) &&
+                isDwmCompositionEnabled() && DynamicApis::instance().pDwmFlush) {
+                DynamicApis::instance().pDwmFlush();
+            }
+        });
+        if (isSystemBorderEnabled()) {
+            // Store the original top margin before the default window procedure applies the
+            // default frame.
+            const LONG originalTop = clientRect->top;
+            // Apply the default frame because we don't want to remove the whole window
+            // frame, we still need the standard window frame (the resizable frame border
+            // and the frame shadow) for the left, bottom and right edges. If we return 0
+            // here directly, the whole window frame will be removed (which means there will
+            // be no resizable frame border and the frame shadow will also disappear), and
+            // that's also how most applications customize their title bars on Windows. It's
+            // totally OK but since we want to preserve as much original frame as possible,
+            // we can't use that solution.
+            const LRESULT originalResult = ::DefWindowProcW(hWnd, WM_NCCALCSIZE, wParam, lParam);
+            if (originalResult != 0) {
+                *result = originalResult;
+                return true;
+            }
+            // Re-apply the original top from before the size of the default frame was
+            // applied, and the whole top frame (the title bar and the top border) is gone
+            // now. For the top frame, we only has 2 choices: (1) remove the top frame
+            // entirely, or (2) don't touch it at all. We can't preserve the top border by
+            // adjusting the top margin here. If we try to modify the top margin, the
+            // original title bar will always be painted by DWM regardless what margin we
+            // set, so here we can only remove the top frame entirely and use some special
+            // technique to bring the top border back.
+            clientRect->top = originalTop;
+        }
+
+        const bool max = isMaximized(hWnd);
+        const bool full = isFullScreen(hWnd);
+        // We don't need this correction when we're fullscreen. We will
+        // have the WS_POPUP size, so we don't have to worry about
+        // borders, and the default frame will be fine.
+        if (max && !full) {
+            // When a window is maximized, its size is actually a little bit more
+            // than the monitor's work area. The window is positioned and sized in
+            // such a way that the resize handles are outside the monitor and
+            // then the window is clipped to the monitor so that the resize handle
+            // do not appear because you don't need them (because you can't resize
+            // a window when it's maximized unless you restore it).
+            const quint32 frameSize = getResizeBorderThickness(hWnd);
+            clientRect->top += frameSize;
+            if (!isSystemBorderEnabled()) {
+                clientRect->bottom -= frameSize;
+                clientRect->left += frameSize;
+                clientRect->right -= frameSize;
+            }
+        }
+        // Attempt to detect if there's an autohide taskbar, and if
+        // there is, reduce our size a bit on the side with the taskbar,
+        // so the user can still mouse-over the taskbar to reveal it.
+        // Make sure to use MONITOR_DEFAULTTONEAREST, so that this will
+        // still find the right monitor even when we're restoring from
+        // minimized.
+        if (max || full) {
+            APPBARDATA abd{};
+            abd.cbSize = sizeof(abd);
+            const UINT taskbarState = ::SHAppBarMessage(ABM_GETSTATE, &abd);
+            // First, check if we have an auto-hide taskbar at all:
+            if (taskbarState & ABS_AUTOHIDE) {
+                bool top = false, bottom = false, left = false, right = false;
+                // Due to ABM_GETAUTOHIDEBAREX was introduced in Windows 8.1,
+                // we have to use another way to judge this if we are running
+                // on Windows 7 or Windows 8.
+                if (isWin8Point1OrGreater()) {
+                    const RECT monitorRect = getMonitorForWindow(hWnd).rcMonitor;
+                    // This helper can be used to determine if there's an
+                    // auto-hide taskbar on the given edge of the monitor
+                    // we're currently on.
+                    const auto hasAutohideTaskbar = [monitorRect](const UINT edge) -> bool {
+                        APPBARDATA abd2{};
+                        abd2.cbSize = sizeof(abd2);
+                        abd2.uEdge = edge;
+                        abd2.rc = monitorRect;
+                        const auto hTaskbar =
+                            reinterpret_cast<HWND>(::SHAppBarMessage(ABM_GETAUTOHIDEBAREX, &abd2));
+                        return (hTaskbar != nullptr);
+                    };
+                    top = hasAutohideTaskbar(ABE_TOP);
+                    bottom = hasAutohideTaskbar(ABE_BOTTOM);
+                    left = hasAutohideTaskbar(ABE_LEFT);
+                    right = hasAutohideTaskbar(ABE_RIGHT);
+                } else {
+                    int edge = -1;
+                    APPBARDATA abd2{};
+                    abd2.cbSize = sizeof(abd2);
+                    abd2.hWnd = ::FindWindowW(L"Shell_TrayWnd", nullptr);
+                    HMONITOR windowMonitor = ::MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+                    HMONITOR taskbarMonitor =
+                        ::MonitorFromWindow(abd2.hWnd, MONITOR_DEFAULTTOPRIMARY);
+                    if (taskbarMonitor == windowMonitor) {
+                        ::SHAppBarMessage(ABM_GETTASKBARPOS, &abd2);
+                        edge = int(abd2.uEdge);
+                    }
+                    top = (edge == ABE_TOP);
+                    bottom = (edge == ABE_BOTTOM);
+                    left = (edge == ABE_LEFT);
+                    right = (edge == ABE_RIGHT);
+                }
+                // If there's a taskbar on any side of the monitor, reduce
+                // our size a little bit on that edge.
+                // Note to future code archeologists:
+                // This doesn't seem to work for fullscreen on the primary
+                // display. However, testing a bunch of other apps with
+                // fullscreen modes and an auto-hiding taskbar has
+                // shown that _none_ of them reveal the taskbar from
+                // fullscreen mode. This includes Edge, Firefox, Chrome,
+                // Sublime Text, PowerPoint - none seemed to support this.
+                // This does however work fine for maximized.
+                if (top) {
+                    // Peculiarly, when we're fullscreen,
+                    clientRect->top += kAutoHideTaskBarThickness;
+                } else if (bottom) {
+                    clientRect->bottom -= kAutoHideTaskBarThickness;
+                } else if (left) {
+                    clientRect->left += kAutoHideTaskBarThickness;
+                } else if (right) {
+                    clientRect->right -= kAutoHideTaskBarThickness;
+                }
+            }
+        }
+        // By returning WVR_REDRAW we can make the window resizing look
+        // less broken. But we must return 0 if wParam is FALSE, according to Microsoft
+        // Docs.
+        // **IMPORTANT NOTE**:
+        // If you are drawing something manually through D3D in your window, don't
+        // try to return WVR_REDRAW here, otherwise Windows exhibits bugs where
+        // client pixels and child windows are mispositioned by the width/height
+        // of the upper-left non-client area. It's confirmed that this issue exists
+        // from Windows 7 to Windows 10. Not tested on Windows 11 yet. Don't know
+        // whether it exists on Windows XP to Windows Vista or not.
+
+        // https://github.com/chromium/chromium/blob/5d297da3cf2a642e9ace2b23fed097370bc70814/ui/views/win/hwnd_message_handler.cc#L2330
+        // Do not return WVR_REDRAW otherwise child HWNDs will be mispositioned.
+        *result = FALSE;
+        return true;
+    }
+
+    bool Win32WindowContext::systemMenuHandler(HWND hWnd, UINT message, WPARAM wParam,
+                                               LPARAM lParam, LRESULT *result) {
+        Q_ASSERT(hWnd);
+        Q_ASSERT(result);
+        const auto getNativePosFromMouse = [lParam]() -> POINT {
+            return {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        };
+        const auto getNativeGlobalPosFromKeyboard = [hWnd]() -> POINT {
+            const bool maxOrFull = isMaximized(hWnd) || isFullScreen(hWnd);
+            const quint32 frameSize = getResizeBorderThickness(hWnd);
+            const quint32 horizontalOffset =
+                ((maxOrFull || !isSystemBorderEnabled()) ? 0 : frameSize);
+            const auto verticalOffset = [hWnd, maxOrFull, frameSize]() -> quint32 {
+                const quint32 titleBarHeight = getTitleBarHeight(hWnd);
+                if (!isSystemBorderEnabled()) {
+                    return titleBarHeight;
+                }
+                if (isWin11OrGreater()) {
+                    if (maxOrFull) {
+                        return (titleBarHeight + frameSize);
+                    }
+                    return titleBarHeight;
+                }
+                if (maxOrFull) {
+                    return titleBarHeight;
+                }
+                return titleBarHeight - frameSize;
+            }();
+            RECT windowPos{};
+            ::GetWindowRect(hWnd, &windowPos);
+            return {static_cast<LONG>(windowPos.left + horizontalOffset),
+                    static_cast<LONG>(windowPos.top + verticalOffset)};
+        };
+        bool shouldShowSystemMenu = false;
+        bool broughtByKeyboard = false;
+        POINT nativeGlobalPos{};
+
+        switch (message) {
+            case WM_RBUTTONUP: {
+                const POINT nativeLocalPos = getNativePosFromMouse();
+                const QPoint qtScenePos = QHighDpi::fromNativeLocalPosition(
+                    point2qpoint(nativeLocalPos), m_windowHandle.data());
+                WindowAgentBase::SystemButton sysButtonType = WindowAgentBase::Unknown;
+                if (isInTitleBarDraggableArea(qtScenePos) ||
+                    (isInSystemButtons(qtScenePos, &sysButtonType) &&
+                     sysButtonType == WindowAgentBase::WindowIcon)) {
+                    shouldShowSystemMenu = true;
+                    nativeGlobalPos = nativeLocalPos;
+                    ::ClientToScreen(hWnd, &nativeGlobalPos);
+                }
+                break;
+            }
+            case WM_NCRBUTTONUP: {
+                if (wParam == HTCAPTION) {
+                    shouldShowSystemMenu = true;
+                    nativeGlobalPos = getNativePosFromMouse();
+                }
+                break;
+            }
+            case WM_SYSCOMMAND: {
+                const WPARAM filteredWParam = (wParam & 0xFFF0);
+                switch (filteredWParam) {
+                    case SC_MOUSEMENU:
+                        shouldShowSystemMenu = true;
+                        nativeGlobalPos = getNativeGlobalPosFromKeyboard();
+                        break;
+                    case SC_KEYMENU:
+                        if (lParam == VK_SPACE) {
+                            shouldShowSystemMenu = true;
+                            broughtByKeyboard = true;
+                            nativeGlobalPos = getNativeGlobalPosFromKeyboard();
+                        }
+                        break;
+                    default:
+                        break;
+                }
+                break;
+            }
+            case WM_KEYDOWN:
+            case WM_SYSKEYDOWN: {
+                const bool altPressed = ((wParam == VK_MENU) || (::GetKeyState(VK_MENU) < 0));
+                const bool spacePressed = ((wParam == VK_SPACE) || (::GetKeyState(VK_SPACE) < 0));
+                if (altPressed && spacePressed) {
+                    shouldShowSystemMenu = true;
+                    broughtByKeyboard = true;
+                    nativeGlobalPos = getNativeGlobalPosFromKeyboard();
+                }
+                break;
+            }
+            default:
+                break;
+        }
+
+        if (shouldShowSystemMenu) {
+            static HHOOK mouseHook = nullptr;
+            static std::optional<POINT> mouseClickPos;
+            static bool mouseDoubleClicked = false;
+            bool mouseHookedLocal = false;
+
+            // The menu is triggered by a click on icon button
+            if (iconButtonClickTime > 0) {
+                POINT menuPos{0, static_cast<LONG>(getTitleBarHeight(hWnd))};
+                if (const auto tb = titleBar()) {
+                    auto titleBarHeight = qreal(m_delegate->mapGeometryToScene(tb).height());
+                    titleBarHeight *= m_windowHandle->devicePixelRatio();
+                    menuPos.y = qRound(titleBarHeight);
+                }
+                ::ClientToScreen(hWnd, &menuPos);
+                nativeGlobalPos = menuPos;
+
+#ifdef Q_CC_MINGW
+#  define MOUSE_HOOK CALLBACK
+#else
+#  define MOUSE_HOOK
+#endif
+
+                // Install mouse hook
+                if (!mouseHook) {
+                    mouseHook = ::SetWindowsHookExW(
+                        WH_MOUSE,
+                        [](int nCode, WPARAM wParam, LPARAM lParam) -> LRESULT MOUSE_HOOK {
+                            if (nCode >= 0) {
+                                switch (wParam) {
+                                    case WM_LBUTTONDBLCLK:
+                                        mouseDoubleClicked = true;
+                                        Q_FALLTHROUGH();
+
+                                        // case WM_POINTERDOWN:
+
+                                    case WM_LBUTTONDOWN: {
+                                        auto pMouseStruct =
+                                            reinterpret_cast<MOUSEHOOKSTRUCT *>(lParam);
+                                        if (pMouseStruct) {
+                                            mouseClickPos = pMouseStruct->pt;
+                                        }
+                                        break;
+                                    }
+                                    default:
+                                        break;
+                                }
+                            }
+                            return ::CallNextHookEx(nullptr, nCode, wParam, lParam);
+                        },
+                        nullptr, ::GetCurrentThreadId());
+                    mouseHookedLocal = true;
+                }
+            }
+
+#undef MOUSE_HOOK
+
+            bool res =
+                showSystemMenu_sys(hWnd, nativeGlobalPos, broughtByKeyboard, isHostSizeFixed());
+
+            // Uninstall mouse hook and check if it's a double-click
+            if (mouseHookedLocal) {
+                ::UnhookWindowsHookEx(mouseHook);
+
+                // Emulate the Windows icon button's behavior
+                if (!res && mouseClickPos.has_value()) {
+                    POINT nativeLocalPos = mouseClickPos.value();
+                    ::ScreenToClient(hWnd, &nativeLocalPos);
+                    QPoint qtScenePos = QHighDpi::fromNativeLocalPosition(
+                        point2qpoint(nativeLocalPos), m_windowHandle.data());
+                    WindowAgentBase::SystemButton sysButtonType = WindowAgentBase::Unknown;
+                    if (isInSystemButtons(qtScenePos, &sysButtonType) &&
+                        sysButtonType == WindowAgentBase::WindowIcon) {
+                        iconButtonClickLevel |= IconButtonClicked;
+                        if (::GetTickCount64() - iconButtonClickTime <= ::GetDoubleClickTime()) {
+                            iconButtonClickLevel |= IconButtonTriggersClose;
+                        }
+                    }
+                }
+
+                if (mouseDoubleClicked) {
+                    iconButtonClickLevel |= IconButtonDoubleClicked;
+                }
+
+                mouseHook = nullptr;
+                mouseClickPos.reset();
+                mouseDoubleClicked = false;
+            }
+
+            // QPA's internal code will handle system menu events separately, and its
+            // behavior is not what we would want to see because it doesn't know our
+            // window doesn't have any window frame now, so return early here to avoid
+            // entering Qt's own handling logic.
+            *result = FALSE;
+            return true;
+        }
+        return false;
+    }
+
+}

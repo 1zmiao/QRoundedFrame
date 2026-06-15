@@ -1,0 +1,31 @@
+# Python / Qt runtime caches
+__pycache__/
+*.py[cod]
+*.pyo
+.qmlcache/
+
+# Local user data and secrets
+user_data/
+
+# Build outputs and generated native build trees
+app/cpp/frameless_native/build-*/
+app/cpp/frameless_native/.build*/
+build/
+dist/
+
+# Logs and smoke-test output
+*.log
+build_output.txt
+run_smoke.out
+run_smoke.err
+
+# Editor / OS noise
+.vscode/
+.DS_Store
+Thumbs.db
+# Native link-only artifacts; runtime uses DLL/qmldir/qmltypes/resource map
+app/prebuilt/**/*.lib
+app/prebuilt/**/*.exp
+
+# README screenshots are generated outside this source release unless explicitly added
+resources/readme/

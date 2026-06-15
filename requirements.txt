@@ -1,0 +1,2 @@
+# 默认 C++/QML UI 不依赖 PySide6。
+# Python 仅用于业务 worker；后续按实际业务在这里追加依赖。

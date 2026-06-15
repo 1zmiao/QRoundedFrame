@@ -1,0 +1,7 @@
+module FramelessNative
+linktarget FramelessNativeplugin
+optional plugin FramelessNativeplugin
+classname FramelessNativePlugin
+typeinfo FramelessNative.qmltypes
+prefer :/qt/qml/FramelessNative/
+

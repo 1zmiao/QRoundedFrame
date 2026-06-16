@@ -7,8 +7,11 @@ QtObject {
     property string mode: (typeof App !== "undefined" && App && App.theme) ? App.theme.mode : "light"
     property color primary: (typeof App !== "undefined" && App && App.theme) ? App.theme.primaryColor : "#537FCD"
     property real fontScale: (typeof App !== "undefined" && App && App.theme) ? App.theme.fontScale : 1.0
+    property real systemUiScale: (typeof App !== "undefined" && App && App.theme) ? App.theme.systemUiScale : 1.0
+    property real contentFontScale: fontScale * systemUiScale
+    property real contentControlScale: controlScale * systemUiScale
     property int settingsRevision: (typeof App !== "undefined" && App && App.settings) ? App.settings.revision : 0
-    property int baseFontSize: Math.max(12, Math.min(20, Math.round(13 * fontScale)))
+    property int baseFontSize: Math.max(12, Math.min(28, Math.round(13 * contentFontScale)))
     property real controlScale: Math.max(0.90, Math.min(1.24, fontScale))
     property bool showColorButton: (typeof App !== "undefined" && App && App.theme) ? App.theme.showColorButton : true
     property bool lowMemoryMode: (typeof App !== "undefined" && App && App.performance) ? App.performance.lowMemoryMode : false
@@ -32,9 +35,9 @@ QtObject {
         )
     }
     function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
-    function sp(v) { return Math.max(12, Math.round(v * fontScale)) }
+    function sp(v) { return Math.max(12, Math.round(v * contentFontScale)) }
     function fs(v) { return sp(v) }
-    function dp(v) { return Math.max(1, Math.round(v * controlScale)) }
+    function dp(v) { return Math.max(1, Math.round(v * contentControlScale)) }
     function setBaseFontSize(px) {
         const next = Math.max(12, Math.min(20, Math.round(Number(px))))
         if (typeof App !== "undefined" && App && App.theme)
@@ -78,8 +81,8 @@ QtObject {
         property int navIconOnlyThreshold: Math.max(54, theme.dp(62))
         property int navIconWidth: Math.max(42, theme.dp(46))
         property int navItemHeight: Math.max(34, theme.dp(36))
-        property int shadowMargin: Math.max(9, theme.dp(9))
-        property int windowShadowMargin: Math.max(32, theme.dp(38))
+        property int shadowMargin: 9
+        property int windowShadowMargin: 38
         property int resizeEdgeInset: 6
         property int resizeCornerInset: 8
         property real windowShadowOpacityDark: 0.68

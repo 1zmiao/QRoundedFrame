@@ -495,12 +495,21 @@ Module {
             index: 0
             isReadonly: true
         }
+        Property {
+            name: "effectiveDevicePixelRatio"
+            type: "double"
+            read: "effectiveDevicePixelRatio"
+            notify: "effectiveDevicePixelRatioChanged"
+            index: 1
+            isReadonly: true
+        }
         Signal { name: "nativeSizeMoveActiveChanged" }
         Signal {
             name: "nativeSystemButtonHoverChanged"
             Parameter { name: "role"; type: "QString" }
         }
         Signal { name: "nativeSystemMoveFinished" }
+        Signal { name: "effectiveDevicePixelRatioChanged" }
         Method {
             name: "setup"
             Parameter { name: "window"; type: "QQuickWindow"; isPointer: true }
@@ -554,6 +563,7 @@ Module {
             Parameter { name: "right"; type: "int" }
             Parameter { name: "bottom"; type: "int" }
         }
+        Method { name: "effectiveDevicePixelRatio"; type: "double" }
         Method {
             name: "setFastExitOnClose"
             Parameter { name: "enabled"; type: "bool" }

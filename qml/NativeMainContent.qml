@@ -19,6 +19,15 @@ Item {
         return Math.round(value / physicalPixel) * physicalPixel
     }
 
+    function savedNavLogicalWidth() {
+        if (typeof App === "undefined" || !App || !App.settings)
+            return 46
+        const logicalWidth = Number(App.settings.valueOr("layout/navWidth", 46))
+        if (logicalWidth <= 0)
+            return 0
+        return Math.max(0, Math.min(logicalWidth, 132))
+    }
+
     property string windowKey: "main"
     property bool nativeMaximized: false
     property bool nativeSnapped: false
@@ -505,7 +514,7 @@ Item {
                 ResizableSideNav {
                     id: sideNav
                     height: parent.height
-                    width: sideNav.snapToPhysicalPixel((typeof App !== "undefined" && App && App.settings) ? Math.max(0, Math.min(App.settings.valueOr("layout/navWidth", Core.Theme.metrics.navWidthDefault), Core.Theme.metrics.navWidthMax)) : Core.Theme.metrics.navWidthDefault)
+                    logicalWidth: root.savedNavLogicalWidth()
                     cornerRadius: root.cornerRadius
                     currentPage: root.savedCurrentPage()
                     onPageIntent: function(page) { pageHost.preparePage(page) }

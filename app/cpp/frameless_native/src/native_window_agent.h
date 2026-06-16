@@ -5,8 +5,10 @@
 #include <QtCore/QObject>
 #include <QtCore/QPointer>
 #include <QtCore/QSize>
+#include <QtCore/QString>
 #include <QtCore/QUrl>
 #include <QtGui/QColor>
+#include <QtGui/QScreen>
 #include <QtQml/qqmlregistration.h>
 #include <QtQuick/QQuickItem>
 #include <QtQuick/QQuickWindow>
@@ -17,6 +19,7 @@ class NativeWindowAgent : public QWK::QuickWindowAgent, public QAbstractNativeEv
     Q_OBJECT
     QML_ELEMENT
     Q_PROPERTY(bool nativeSizeMoveActive READ nativeSizeMoveActive NOTIFY nativeSizeMoveActiveChanged)
+    Q_PROPERTY(qreal effectiveDevicePixelRatio READ effectiveDevicePixelRatio NOTIFY effectiveDevicePixelRatioChanged)
 
 public:
     explicit NativeWindowAgent(QObject *parent = nullptr);
@@ -34,6 +37,7 @@ public:
     Q_INVOKABLE void setShellBackgroundColor(const QColor &color);
     Q_INVOKABLE void setResizeHitTestInsets(int edgeInset, int cornerInset);
     Q_INVOKABLE void setGtkFrameExtents(int left, int top, int right, int bottom);
+    Q_INVOKABLE qreal effectiveDevicePixelRatio() const;
     Q_INVOKABLE void setFastExitOnClose(bool enabled);
     Q_INVOKABLE bool isMaximized(QQuickWindow *window) const;
     Q_INVOKABLE void toggleMaximized(QQuickWindow *window);
@@ -44,6 +48,7 @@ signals:
     void nativeSizeMoveActiveChanged();
     void nativeSystemButtonHoverChanged(const QString &role);
     void nativeSystemMoveFinished();
+    void effectiveDevicePixelRatioChanged();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -61,6 +66,12 @@ private:
     void uninstallNativeShellFilter();
     void updateClassBackgroundBrush();
     void restoreClassBackgroundBrush();
+    void refreshScreenConnections();
+    void installX11RootPropertyListener();
+    void installKdeScaleWatcher();
+    void refreshKdeScaleWatcherPaths();
+    void refreshNativeMetrics(const char *reason = "refresh");
+    void traceNativeMetrics(const char *reason) const;
     int nativeSystemButtonHitTest(qintptr lParam) const;
     bool nativeItemContainsScreenPoint(QQuickItem *item, qintptr lParam) const;
     bool nativeItemContainsScreenPoint(QQuickItem *item, qintptr lParam, bool extendToTitleBarHeight) const;
@@ -70,6 +81,7 @@ private:
     void setNativeSizeMoveActive(bool active);
 
     QPointer<QQuickWindow> m_window;
+    QPointer<QScreen> m_screen;
     QPointer<QQuickItem> m_titleBarItem;
     QPointer<QQuickItem> m_minimizeButton;
     QPointer<QQuickItem> m_maximizeButton;
@@ -90,6 +102,13 @@ private:
     int m_hoveredNativeButtonHit = 0;
     bool m_fastExitOnClose = false;
     bool m_linuxSystemMoveActive = false;
+    bool m_x11RootPropertyListenerInstalled = false;
+    QObject *m_kdeScaleWatcher = nullptr;
+    QString m_kdeConfigDir;
+    QString m_kdeGlobalsPath;
+    QString m_kcmFontsPath;
+    qreal m_lastNativeDpr = 0.0;
+    qreal m_x11ResourceDpr = 0.0;
     QColor m_shellBackgroundColor;
     QUrl m_shadowSource;
     int m_shadowMargin = 0;

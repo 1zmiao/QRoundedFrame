@@ -14,8 +14,11 @@ Item {
 
     property int expandedWidth: Core.Theme.metrics.navWidthDefault
     property int compactWidth: Core.Theme.metrics.navIconWidth
+    property real logicalExpandedWidth: 46
+    property real logicalWidth: 46
+    width: widthFromLogical(logicalWidth)
     property int minWidthBeforeHidden: Core.Theme.dp(18)
-    property int restoreWidth: expandedWidth
+    property real restoreLogicalWidth: logicalExpandedWidth
     property string currentPage: "home"
     property real startWidth: width
     property int cornerRadius: Core.Theme.radius.window
@@ -89,22 +92,28 @@ Item {
         return 1.0
     }
 
+    function widthFromLogical(value) {
+        if (value <= 0)
+            return 0
+        return snapToPhysicalPixel(Math.max(0, Math.min(Core.Theme.dp(value), Core.Theme.metrics.navWidthMax)))
+    }
+
     function persistWidthLater() {
         Qt.callLater(function() {
             if (typeof App !== "undefined" && App && App.settings)
-                App.settings.setValue("layout/navWidth", Math.round(root.width))
+                App.settings.setValue("layout/navWidth", Math.round(root.logicalWidth))
         })
     }
 
     function hide() {
         if (width > compactWidth)
-            restoreWidth = width
-        width = 0
+            restoreLogicalWidth = logicalWidth
+        logicalWidth = 0
         persistWidthLater()
     }
 
     function restore() {
-        width = snapToPhysicalPixel(restoreWidth > compactWidth ? restoreWidth : expandedWidth)
+        logicalWidth = restoreLogicalWidth > logicalExpandedWidth ? restoreLogicalWidth : logicalExpandedWidth
         persistWidthLater()
     }
 
@@ -117,26 +126,30 @@ Item {
 
     function applyWidth(next) {
         if (next < minWidthBeforeHidden)
-            width = 0
+            logicalWidth = 0
         else if (next < compactWidth)
-            width = snapToPhysicalPixel(compactWidth)
+            logicalWidth = logicalExpandedWidth
         else
-            width = snapToPhysicalPixel(Math.max(compactWidth, Math.min(Core.Theme.dp(260), next)))
+            logicalWidth = Math.max(logicalExpandedWidth, Math.min(260, next / Math.max(0.01, Core.Theme.contentControlScale)))
     }
 
-    function snapCurrentWidthLater() {
-        Qt.callLater(function() {
-            if (root.width > 0)
-                root.width = snapToPhysicalPixel(root.width)
-        })
+    function refreshWidthBinding() {
+        logicalWidth = logicalWidth
     }
 
-    onDevicePixelRatioChanged: snapCurrentWidthLater()
+    onDevicePixelRatioChanged: refreshWidthBinding()
+    onWidthChanged: {
+        if (width > compactWidth)
+            restoreLogicalWidth = logicalWidth
+    }
     onSideGlowHexChanged: refreshSideGlow()
     onCornerRadiusChanged: refreshSideGlow()
     onSideGlowPixelWidthChanged: refreshSideGlow()
     onSideGlowPixelHeightChanged: refreshSideGlow()
-    Component.onCompleted: snapCurrentWidthLater()
+    Connections {
+        target: Core.Theme
+        function onContentControlScaleChanged() { root.refreshWidthBinding() }
+    }
 
     Item {
         id: bgLayer

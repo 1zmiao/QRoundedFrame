@@ -8,9 +8,14 @@ import "../controls"
 Window {
     id: root
 
-    readonly property real devicePixelRatio: Math.max(1.0, (root.screen ? root.screen.devicePixelRatio : Screen.devicePixelRatio))
+    readonly property real devicePixelRatio: Math.max(1.0, nativeAgent
+                                                      ? nativeAgent.effectiveDevicePixelRatio
+                                                      : ((root.screen ? root.screen.devicePixelRatio : Screen.devicePixelRatio)))
     readonly property real physicalPixel: 1.0 / devicePixelRatio
     readonly property real stableHairline: Math.max(1.0, physicalPixel)
+    function snapToPhysicalPixel(value) {
+        return Math.round(value / physicalPixel) * physicalPixel
+    }
 
     default property alias content: contentHost.data
     property var bridge
@@ -84,15 +89,17 @@ Window {
                                     && root.customShadowEnabled
                                     && root.cornerRadius > 0
                                     && !root._linuxCsdWindowStateTransition
+                                    && !root._linuxCsdDprTransition
     property int linuxCsdShadowInset: (root.linuxCsdShadow && !root.windowMaximized && !root.snappedVisual)
                                      ? root.externalShadowMargin
                                      : 0
     property int shadowVisualInset: root.linuxCsdShadowInset
-    property int windowStateGeometryInset: 0
+    property int windowStateGeometryInset: root.linuxCsdShadow ? Math.round(root.linuxCsdShadowInset) : 0
     property bool _applyingCsdInsetGeometry: false
     property int _appliedCsdShadowInset: 0
     property bool _pendingLinuxCsdStateSync: false
     property bool _linuxCsdWindowStateTransition: false
+    property bool _linuxCsdDprTransition: false
     property int normalCornerRadius: Core.Theme.radius.window
     property int cornerRadius: (root.windowMaximized || root.snappedVisual || effectiveCornerPolicy === "square") ? 0 : normalCornerRadius
     property bool _localThemeAnimation: false
@@ -142,7 +149,24 @@ Window {
             titleBarControl.maximizeButtonNativeHovered = role === "maximize"
             titleBarControl.closeButtonNativeHovered = role === "close"
         }
-        onNativeSystemMoveFinished: titleBarControl.resetDragState()
+        onNativeSystemMoveFinished: {
+            titleBarControl.resetDragState()
+            root.syncNativeWindowState()
+            root.markNativeShadowDisplayReady()
+            root.syncGtkFrameExtents()
+            root.syncNativeShellBackground()
+        }
+        onEffectiveDevicePixelRatioChanged: root.beginLinuxCsdDprTransition()
+    }
+
+    Connections {
+        target: Screen
+        function onDevicePixelRatioChanged() { root.beginLinuxCsdDprTransition() }
+    }
+
+    Connections {
+        target: Core.Theme
+        function onContentControlScaleChanged() { root.beginLinuxCsdDprTransition() }
     }
 
     ExternalShadowController {
@@ -379,8 +403,20 @@ Window {
     function syncGtkFrameExtents() {
         if (!nativeAgent || !nativeAgent.setGtkFrameExtents)
             return
-        const inset = root.linuxCsdShadow && !root._linuxCsdWindowStateTransition ? root.linuxCsdShadowInset : 0
+        const inset = root.linuxCsdShadow && !root._linuxCsdWindowStateTransition
+                    ? root.snapToPhysicalPixel(root.linuxCsdShadowInset)
+                    : 0
         nativeAgent.setGtkFrameExtents(inset, inset, inset, inset)
+    }
+
+    function beginLinuxCsdDprTransition() {
+        if (!root.linuxCsdShadow)
+            return
+        root._linuxCsdDprTransition = true
+        root.applyLinuxCsdShadowInset()
+        root.syncGtkFrameExtents()
+        nativeAgent.setCornerRadius(root.cornerRadius)
+        root.syncNativeShellBackground()
     }
 
     function toggleMaximized() {
@@ -518,16 +554,23 @@ Window {
         }
     }
 
+    Rectangle {
+        anchors.fill: parent
+        color: "transparent"
+        visible: root.linuxCsdShadow
+        z: -1
+    }
+
     Item {
         id: linuxCsdShadowLayer
         anchors.fill: frameRoot
-        anchors.margins: -root.linuxCsdShadowInset
+        anchors.margins: -root.snapToPhysicalPixel(root.linuxCsdShadowInset)
         visible: root.csdShadowVisible
         opacity: root.externalShadowOpacity
         z: 0
 
         readonly property url shadowSource: Qt.resolvedUrl("../../resources/images/window_shadow.png")
-        readonly property int m: root.linuxCsdShadowInset
+        readonly property real m: root.snapToPhysicalPixel(root.linuxCsdShadowInset)
         readonly property int sourceSize: 160
         readonly property int innerRadiusBias: Qt.platform.os === "linux" ? 2 : 0
         readonly property int c: Math.min(sourceSize / 2, m + root.cornerRadius + innerRadiusBias)
@@ -539,7 +582,7 @@ Window {
             sourceClipRect: Qt.rect(0, 0, linuxCsdShadowLayer.c, linuxCsdShadowLayer.c)
             fillMode: Image.Stretch
             smooth: false
-            cache: true
+            cache: false
         }
         Image {
             x: linuxCsdShadowLayer.c; y: 0
@@ -549,7 +592,7 @@ Window {
             sourceClipRect: Qt.rect(linuxCsdShadowLayer.c, 0, linuxCsdShadowLayer.centerSize, linuxCsdShadowLayer.m)
             fillMode: Image.Stretch
             smooth: false
-            cache: true
+            cache: false
         }
         Image {
             x: linuxCsdShadowLayer.width - linuxCsdShadowLayer.c; y: 0
@@ -558,7 +601,7 @@ Window {
             sourceClipRect: Qt.rect(linuxCsdShadowLayer.sourceSize - linuxCsdShadowLayer.c, 0, linuxCsdShadowLayer.c, linuxCsdShadowLayer.c)
             fillMode: Image.Stretch
             smooth: false
-            cache: true
+            cache: false
         }
         Image {
             x: 0; y: linuxCsdShadowLayer.c
@@ -568,7 +611,7 @@ Window {
             sourceClipRect: Qt.rect(0, linuxCsdShadowLayer.c, linuxCsdShadowLayer.m, linuxCsdShadowLayer.centerSize)
             fillMode: Image.Stretch
             smooth: false
-            cache: true
+            cache: false
         }
         Image {
             x: linuxCsdShadowLayer.width - linuxCsdShadowLayer.m; y: linuxCsdShadowLayer.c
@@ -578,7 +621,7 @@ Window {
             sourceClipRect: Qt.rect(linuxCsdShadowLayer.sourceSize - linuxCsdShadowLayer.m, linuxCsdShadowLayer.c, linuxCsdShadowLayer.m, linuxCsdShadowLayer.centerSize)
             fillMode: Image.Stretch
             smooth: false
-            cache: true
+            cache: false
         }
         Image {
             x: 0; y: linuxCsdShadowLayer.height - linuxCsdShadowLayer.c
@@ -587,7 +630,7 @@ Window {
             sourceClipRect: Qt.rect(0, linuxCsdShadowLayer.sourceSize - linuxCsdShadowLayer.c, linuxCsdShadowLayer.c, linuxCsdShadowLayer.c)
             fillMode: Image.Stretch
             smooth: false
-            cache: true
+            cache: false
         }
         Image {
             x: linuxCsdShadowLayer.c; y: linuxCsdShadowLayer.height - linuxCsdShadowLayer.m
@@ -597,7 +640,7 @@ Window {
             sourceClipRect: Qt.rect(linuxCsdShadowLayer.c, linuxCsdShadowLayer.sourceSize - linuxCsdShadowLayer.m, linuxCsdShadowLayer.centerSize, linuxCsdShadowLayer.m)
             fillMode: Image.Stretch
             smooth: false
-            cache: true
+            cache: false
         }
         Image {
             x: linuxCsdShadowLayer.width - linuxCsdShadowLayer.c
@@ -607,7 +650,7 @@ Window {
             sourceClipRect: Qt.rect(linuxCsdShadowLayer.sourceSize - linuxCsdShadowLayer.c, linuxCsdShadowLayer.sourceSize - linuxCsdShadowLayer.c, linuxCsdShadowLayer.c, linuxCsdShadowLayer.c)
             fillMode: Image.Stretch
             smooth: false
-            cache: true
+            cache: false
         }
     }
 
@@ -620,10 +663,10 @@ Window {
         property int shadowVisualInset: 0
         property int cornerRadius: root.cornerRadius
         anchors.fill: parent
-        anchors.leftMargin: root.linuxCsdShadowInset
-        anchors.topMargin: root.linuxCsdShadowInset
-        anchors.rightMargin: root.linuxCsdShadowInset
-        anchors.bottomMargin: root.linuxCsdShadowInset
+        anchors.leftMargin: root.snapToPhysicalPixel(root.linuxCsdShadowInset)
+        anchors.topMargin: root.snapToPhysicalPixel(root.linuxCsdShadowInset)
+        anchors.rightMargin: root.snapToPhysicalPixel(root.linuxCsdShadowInset)
+        anchors.bottomMargin: root.snapToPhysicalPixel(root.linuxCsdShadowInset)
         clip: true
         z: 1
 
@@ -697,7 +740,7 @@ Window {
                 onMoveRequested: function(localX, localY) {
                     root.raiseSelf()
                     titleBarControl._systemMoveAccepted = false
-                    if (root.linuxCsdShadow && nativeAgent.startSystemMove && nativeAgent.startSystemMove(root)) {
+                    if (root.linuxCsdShadow && !root.snappedVisual && nativeAgent.startSystemMove && nativeAgent.startSystemMove(root)) {
                         titleBarControl._systemMoveAccepted = true
                         titleBarControl.clearPointerTracking()
                         return
@@ -888,6 +931,11 @@ Window {
     }
     onFrameSwapped: {
         root.firstFrameReady = true
+        if (root._linuxCsdDprTransition) {
+            root._linuxCsdDprTransition = false
+            root.syncGtkFrameExtents()
+            root.syncNativeShellBackground()
+        }
         root.markNativeShadowDisplayReady()
     }
     onCornerRadiusChanged: {
@@ -901,6 +949,8 @@ Window {
     }
     onCustomShadowEnabledChanged: root.syncExternalShadow()
     onLinuxCsdShadowInsetChanged: {
+        root.applyLinuxCsdShadowInset()
+        nativeAgent.setCornerRadius(root.cornerRadius)
         root.syncGtkFrameExtents()
         root.syncNativeShellBackground()
     }

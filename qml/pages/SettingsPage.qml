@@ -219,16 +219,6 @@ Item {
                     lineHeight: Core.Theme.bodyLineHeight
                 }
 
-
-                AppCheckBox {
-                    width: parent.width
-                    wrapText: true
-                    text: "自动清理热缓存（每 10 秒检查一次；低内存模式超过 110MB、普通模式超过 160MB 时清理）"
-                    storageKey: "performance/autoTrimMemory"
-                    checked: true
-                    autoLoad: true
-                }
-
                 AppCheckBox {
                     width: parent.width
                     wrapText: true
@@ -327,49 +317,58 @@ Item {
                     active: root.appReady && App.performance && App.performance.developerUnlocked
                     visible: active
                     sourceComponent: Column {
-                    width: developerOptionsLoader.width
-                    spacing: Core.Theme.dp(8)
+                        width: developerOptionsLoader.width
+                        spacing: Core.Theme.dp(8)
 
-                    Flow {
-                        width: parent.width
-                        spacing: Core.Theme.dp(10)
-                        Text { text: "资源档位"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.fontSize.body; width: Core.Theme.dp(86); height: Core.Theme.metrics.controlHeight; verticalAlignment: Text.AlignVCenter }
-                        AppSelect {
-                            id: profileCombo
-                            width: Math.min(Core.Theme.dp(230), Math.max(Core.Theme.dp(150), parent.width - Core.Theme.dp(96)))
-                            model: ["自动", "普通模式", "低内存模拟"]
-                            currentIndex: root.profileIndex(root.performanceProfile())
-                            onActivated: function(index) {
-                                if (root.appReady && App.performance)
-                                    App.performance.setResourceProfile(root.profileFromIndex(index))
+                        Flow {
+                            width: parent.width
+                            spacing: Core.Theme.dp(10)
+                            Text { text: "资源档位"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.fontSize.body; width: Core.Theme.dp(86); height: Core.Theme.metrics.controlHeight; verticalAlignment: Text.AlignVCenter }
+                            AppSelect {
+                                id: profileCombo
+                                width: Math.min(Core.Theme.dp(230), Math.max(Core.Theme.dp(150), parent.width - Core.Theme.dp(96)))
+                                model: ["自动", "普通模式", "低内存模拟"]
+                                currentIndex: root.profileIndex(root.performanceProfile())
+                                onActivated: function(index) {
+                                    if (root.appReady && App.performance)
+                                        App.performance.setResourceProfile(root.profileFromIndex(index))
+                                }
                             }
                         }
-                    }
 
-                    Text {
-                        width: parent.width
-                        text: "当前生效：" + (root.effectiveProfile() === "low-memory" ? "低内存" : "普通") + "。自动模式只在 4GB 及以下内存设备上进入低内存策略。"
-                        color: Core.Theme.color.mutedText
-                        font.pixelSize: Core.Theme.fontSize.caption
-                        font.family: Core.Theme.appFontFamily
-                        wrapMode: Text.WordWrap
-                        lineHeight: Core.Theme.bodyLineHeight
-                    }
-                    Text {
-                        width: parent.width
-                        text: "切换后需重开子窗口才会完整生效。"
-                        color: Core.Theme.color.mutedText
-                        font.pixelSize: Core.Theme.fontSize.caption
-                        font.family: Core.Theme.appFontFamily
-                        wrapMode: Text.WordWrap
-                        lineHeight: Core.Theme.bodyLineHeight
-                    }
+                        Text {
+                            width: parent.width
+                            text: "当前生效：" + (root.effectiveProfile() === "low-memory" ? "低内存" : "普通") + "。自动模式只在 4GB 及以下内存设备上进入低内存策略。"
+                            color: Core.Theme.color.mutedText
+                            font.pixelSize: Core.Theme.fontSize.caption
+                            font.family: Core.Theme.appFontFamily
+                            wrapMode: Text.WordWrap
+                            lineHeight: Core.Theme.bodyLineHeight
+                        }
+                        // Text {
+                        //     width: parent.width
+                        //     text: "切换后需重开子窗口才会完整生效。"
+                        //     color: Core.Theme.color.mutedText
+                        //     font.pixelSize: Core.Theme.fontSize.caption
+                        //     font.family: Core.Theme.appFontFamily
+                        //     wrapMode: Text.WordWrap
+                        //     lineHeight: Core.Theme.bodyLineHeight
+                        // }
 
-                    Connections {
-                        target: root.appReady && App.performance ? App.performance : null
-                        function onResourceProfileChanged(profile) { profileCombo.currentIndex = root.profileIndex(profile) }
+                        AppCheckBox {
+                            width: parent.width
+                            wrapText: true
+                            text: "自动清理热缓存（根据4G上下内存档位分别超过 110/160MB 时清理）"
+                            storageKey: "performance/autoTrimMemory"
+                            checked: true
+                            autoLoad: true
+                        }
+
+                        Connections {
+                            target: root.appReady && App.performance ? App.performance : null
+                            function onResourceProfileChanged(profile) { profileCombo.currentIndex = root.profileIndex(profile) }
+                        }
                     }
-                }
                 }
             }
         }

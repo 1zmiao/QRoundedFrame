@@ -120,14 +120,93 @@ QString nativeFlavorForHost()
 #endif
 }
 
+#ifdef Q_OS_LINUX
+QString linuxDesktopTextForRenderBackend()
+{
+    return QStringList{
+        QString::fromLocal8Bit(qgetenv("XDG_CURRENT_DESKTOP")),
+        QString::fromLocal8Bit(qgetenv("XDG_SESSION_DESKTOP")),
+        QString::fromLocal8Bit(qgetenv("DESKTOP_SESSION")),
+    }.join(u';').toLower();
+}
+
+bool isKdeOrPlasmaDesktopForRenderBackend()
+{
+    const QString text = linuxDesktopTextForRenderBackend();
+    return text.contains(QStringLiteral("kde")) || text.contains(QStringLiteral("plasma"));
+}
+
+qreal readKdeScaleFactorForRenderBackend()
+{
+    QFile file(QDir::homePath() + QStringLiteral("/.config/kdeglobals"));
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return 1.0;
+
+    bool inKScreen = false;
+    QString screenScaleFactors;
+    while (!file.atEnd()) {
+        const QString line = QString::fromUtf8(file.readLine()).trimmed();
+        if (line.isEmpty() || line.startsWith(u'#') || line.startsWith(u';'))
+            continue;
+        if (line.startsWith(u'[') && line.endsWith(u']')) {
+            inKScreen = line.mid(1, line.size() - 2) == QStringLiteral("KScreen");
+            continue;
+        }
+        if (!inKScreen)
+            continue;
+        const int equals = line.indexOf(u'=');
+        if (equals <= 0)
+            continue;
+        const QString key = line.left(equals).trimmed();
+        const QString value = line.mid(equals + 1).trimmed();
+        if (key == QStringLiteral("ScaleFactor")) {
+            bool ok = false;
+            const qreal scale = value.toDouble(&ok);
+            if (ok && scale > 0.0)
+                return scale;
+        } else if (key == QStringLiteral("ScreenScaleFactors")) {
+            screenScaleFactors = value;
+        }
+    }
+
+    const QStringList parts = screenScaleFactors.split(u';', Qt::SkipEmptyParts);
+    for (const QString &part : parts) {
+        const int equals = part.lastIndexOf(u'=');
+        if (equals < 0)
+            continue;
+        bool ok = false;
+        const qreal scale = part.mid(equals + 1).trimmed().toDouble(&ok);
+        if (ok && scale > 0.0)
+            return scale;
+    }
+    return 1.0;
+}
+
+bool kdeScaledRenderBackendNeeded()
+{
+    if (!isKdeOrPlasmaDesktopForRenderBackend())
+        return false;
+    return qAbs(readKdeScaleFactorForRenderBackend() - 1.0) > 0.001;
+}
+#endif
+
 void configureRenderBackend()
 {
 #ifdef Q_OS_WIN
     setDefaultEnv("QSG_RHI_BACKEND", "d3d11");
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D11);
 #elif defined(Q_OS_LINUX)
-    setDefaultEnv("QT_QUICK_BACKEND", "software");
-    QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+    const QString backend = QString::fromLocal8Bit(qgetenv("QROUNDEDFRAME_RENDER_BACKEND")).trimmed().toLower();
+    const bool useOpenGl = backend == QLatin1String("opengl")
+        || (backend.isEmpty() && kdeScaledRenderBackendNeeded());
+    if (useOpenGl) {
+        qputenv("QSG_RHI_BACKEND", "opengl");
+        qunsetenv("QT_QUICK_BACKEND");
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+    } else {
+        setDefaultEnv("QT_QUICK_BACKEND", "software");
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+    }
 #endif
 }
 

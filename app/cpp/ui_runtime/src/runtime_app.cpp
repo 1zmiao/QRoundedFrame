@@ -52,6 +52,95 @@
 #include <unistd.h>
 #endif
 
+namespace {
+
+QString desktopText()
+{
+    return QStringList{
+        QString::fromLocal8Bit(qgetenv("XDG_CURRENT_DESKTOP")),
+        QString::fromLocal8Bit(qgetenv("XDG_SESSION_DESKTOP")),
+        QString::fromLocal8Bit(qgetenv("DESKTOP_SESSION")),
+    }.join(u';').toLower();
+}
+
+bool isKdeDesktop()
+{
+#ifdef Q_OS_LINUX
+    const QString desktop = desktopText();
+    return desktop.contains(QStringLiteral("kde")) || desktop.contains(QStringLiteral("plasma"));
+#else
+    return false;
+#endif
+}
+
+double readKdeScreenScale()
+{
+#ifdef Q_OS_LINUX
+    if (!isKdeDesktop())
+        return 0.0;
+    QFile file(QDir::homePath() + QStringLiteral("/.config/kdeglobals"));
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return 0.0;
+
+    bool inKScreen = false;
+    QString screenScaleFactors;
+    while (!file.atEnd()) {
+        const QString line = QString::fromUtf8(file.readLine()).trimmed();
+        if (line.isEmpty() || line.startsWith(u'#') || line.startsWith(u';'))
+            continue;
+        if (line.startsWith(u'[') && line.endsWith(u']')) {
+            inKScreen = line.mid(1, line.size() - 2) == QStringLiteral("KScreen");
+            continue;
+        }
+        if (!inKScreen)
+            continue;
+        const int equals = line.indexOf(u'=');
+        if (equals <= 0)
+            continue;
+        const QString key = line.left(equals);
+        const QString value = line.mid(equals + 1).trimmed();
+        if (key == QStringLiteral("ScaleFactor")) {
+            bool ok = false;
+            const double scale = value.toDouble(&ok);
+            if (ok && scale > 0.0)
+                return qMax(1.0, scale);
+        } else if (key == QStringLiteral("ScreenScaleFactors")) {
+            screenScaleFactors = value;
+        }
+    }
+
+    const QStringList parts = screenScaleFactors.split(u';', Qt::SkipEmptyParts);
+    for (const QString &part : parts) {
+        const int equals = part.lastIndexOf(u'=');
+        if (equals < 0)
+            continue;
+        bool ok = false;
+        const double scale = part.mid(equals + 1).toDouble(&ok);
+        if (ok && scale > 0.0)
+            return qMax(1.0, scale);
+    }
+#endif
+    return 0.0;
+}
+
+double readQtScreenDpr()
+{
+    QScreen *screen = QGuiApplication::primaryScreen();
+    return screen ? qMax(1.0, screen->devicePixelRatio()) : 1.0;
+}
+
+double readContentUiScale()
+{
+#ifdef Q_OS_LINUX
+    const double kdeScale = readKdeScreenScale();
+    if (kdeScale > 0.0)
+        return qBound(0.5, kdeScale / readQtScreenDpr(), 2.5);
+#endif
+    return 1.0;
+}
+
+} // namespace
+
 #if defined(Q_OS_LINUX) && defined(QROUNDEDFRAME_HAS_X11)
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
@@ -637,6 +726,70 @@ RuntimeTheme::RuntimeTheme(RuntimeSettings *settings, QObject *parent)
     m_darkPrimaryColor = m_settings->valueOr(QStringLiteral("theme/darkPrimaryColor"), m_settings->valueOr(QStringLiteral("theme/primaryColor"), m_darkPrimaryColor)).toString().toUpper();
     m_fontScale = qBound(0.85, m_settings->valueOr(QStringLiteral("ui/fontScale"), m_fontScale).toDouble(), 1.35);
     m_showColorButton = m_settings->valueOr(QStringLiteral("ui/showColorButton"), m_showColorButton).toBool();
+    refreshSystemUiScale();
+    installSystemUiScaleWatcher();
+}
+
+void RuntimeTheme::installSystemUiScaleWatcher()
+{
+    connect(&m_systemUiScaleWatcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &) {
+        refreshSystemUiScaleWatcherPaths();
+        refreshSystemUiScale();
+    });
+    connect(&m_systemUiScaleWatcher, &QFileSystemWatcher::directoryChanged, this, [this](const QString &) {
+        refreshSystemUiScaleWatcherPaths();
+        refreshSystemUiScale();
+    });
+    refreshSystemUiScaleWatcherPaths();
+
+    const auto connectScreen = [this](QScreen *screen) {
+        if (!screen)
+            return;
+        connect(screen, &QScreen::logicalDotsPerInchChanged, this, [this]() { refreshSystemUiScale(); });
+        connect(screen, &QScreen::physicalDotsPerInchChanged, this, [this]() { refreshSystemUiScale(); });
+        connect(screen, &QScreen::geometryChanged, this, [this]() { refreshSystemUiScale(); });
+    };
+    for (QScreen *screen : QGuiApplication::screens())
+        connectScreen(screen);
+    connect(qGuiApp, &QGuiApplication::screenAdded, this, connectScreen);
+    connect(qGuiApp, &QGuiApplication::primaryScreenChanged, this, [this](QScreen *) {
+        refreshSystemUiScale();
+    });
+}
+
+void RuntimeTheme::refreshSystemUiScale()
+{
+    const double next = readContentUiScale();
+    if (qFuzzyCompare(m_systemUiScale, next))
+        return;
+    m_systemUiScale = next;
+    emit systemUiScaleChanged();
+}
+
+void RuntimeTheme::refreshSystemUiScaleWatcherPaths()
+{
+    m_kdeConfigDir = QDir::homePath() + QStringLiteral("/.config");
+    m_kdeGlobalsPath = m_kdeConfigDir + QStringLiteral("/kdeglobals");
+    m_kcmFontsPath = m_kdeConfigDir + QStringLiteral("/kcmfonts");
+
+    const auto ensureWatched = [this](const QString &path, bool directory) {
+        if (path.isEmpty())
+            return;
+        const QStringList existing = directory ? m_systemUiScaleWatcher.directories() : m_systemUiScaleWatcher.files();
+        if (existing.contains(path))
+            return;
+        if (directory) {
+            if (QDir(path).exists())
+                m_systemUiScaleWatcher.addPath(path);
+        } else {
+            if (QFileInfo::exists(path))
+                m_systemUiScaleWatcher.addPath(path);
+        }
+    };
+
+    ensureWatched(m_kdeConfigDir, true);
+    ensureWatched(m_kdeGlobalsPath, false);
+    ensureWatched(m_kcmFontsPath, false);
 }
 
 void RuntimeTheme::setMode(const QString &mode)
@@ -997,11 +1150,13 @@ void RuntimeTray::saveMainWindowStateBeforeExit()
     if (visibility == QLatin1String("normal")) {
         const QRect geometry = window->geometry();
         if (geometry.width() >= 320 && geometry.height() >= 240) {
+            const double dpr = window && window->screen() ? qMax(1.0, window->screen()->devicePixelRatio()) : 1.0;
             m_settings->setValue(QStringLiteral("windows/main/normalGeometry"), QVariantMap{
                 {QStringLiteral("x"), geometry.x()},
                 {QStringLiteral("y"), geometry.y()},
                 {QStringLiteral("w"), geometry.width()},
                 {QStringLiteral("h"), geometry.height()},
+                {QStringLiteral("dpr"), dpr},
             });
         }
     }
@@ -1983,11 +2138,10 @@ bool WindowService::isSnappedState(QObject *windowObject) const
         && qAbs(geometry.width() - available.width() / 2) <= tolerance;
     const bool rightHalf = qAbs(geometry.right() - available.right()) <= tolerance
         && qAbs(geometry.width() - available.width() / 2) <= tolerance;
-    const bool geometrySnapped = fullHeight && (leftHalf || rightHalf);
-    if (geometrySnapped)
-        return true;
     const QVariant explicitValue = window->property("snappedVisual");
-    return explicitValue.isValid() ? explicitValue.toBool() : false;
+    if (explicitValue.isValid() && !explicitValue.toBool())
+        return false;
+    return fullHeight && (leftHalf || rightHalf);
 }
 
 QString WindowService::snapState(QObject *windowObject) const
@@ -2052,6 +2206,43 @@ static QRect outerGeometryForContent(QObject *windowObject, const QRect &content
         : contentGeometry;
 }
 
+static double windowDevicePixelRatio(QWindow *window)
+{
+    if (!window)
+        return 1.0;
+    if (QScreen *screen = window->screen() ? window->screen() : QGuiApplication::primaryScreen())
+        return qMax(1.0, screen->devicePixelRatio());
+    return 1.0;
+}
+
+static QRect scaleSavedContentGeometryForCurrentDpr(const QVariantMap &map, QWindow *window)
+{
+    QRect geometry(
+        map.value(QStringLiteral("x")).toInt(),
+        map.value(QStringLiteral("y")).toInt(),
+        map.value(QStringLiteral("w")).toInt(),
+        map.value(QStringLiteral("h")).toInt());
+    const double savedDpr = qMax(1.0, map.value(QStringLiteral("dpr"), 1.0).toDouble());
+    const double currentDpr = windowDevicePixelRatio(window);
+    if (!qFuzzyCompare(savedDpr, currentDpr)) {
+        const double scale = savedDpr / currentDpr;
+        geometry.setSize(QSize(qMax(320, int(std::lround(geometry.width() * scale))),
+                               qMax(240, int(std::lround(geometry.height() * scale)))));
+    }
+    return geometry;
+}
+
+static QVariantMap contentGeometryMap(const QRect &geometry, QWindow *window)
+{
+    return {
+        {QStringLiteral("x"), geometry.x()},
+        {QStringLiteral("y"), geometry.y()},
+        {QStringLiteral("w"), geometry.width()},
+        {QStringLiteral("h"), geometry.height()},
+        {QStringLiteral("dpr"), windowDevicePixelRatio(window)},
+    };
+}
+
 #ifdef Q_OS_LINUX
 static void cancelWindowManagerMoveResize(QWindow *window)
 {
@@ -2099,14 +2290,8 @@ void WindowService::beginMove(QObject *windowObject, double localX, double local
             windowObject->setProperty("_moveNormalGeometry", savedGeometry);
         else if (!moveStartedFromSnapped) {
             const QRect geometry = managedContentGeometry(windowObject);
-            if (geometry.width() >= 320 && geometry.height() >= 240) {
-                windowObject->setProperty("_moveNormalGeometry", QVariantMap{
-                    {QStringLiteral("x"), geometry.x()},
-                    {QStringLiteral("y"), geometry.y()},
-                    {QStringLiteral("w"), geometry.width()},
-                    {QStringLiteral("h"), geometry.height()},
-                });
-            }
+            if (geometry.width() >= 320 && geometry.height() >= 240)
+                windowObject->setProperty("_moveNormalGeometry", contentGeometryMap(geometry, window));
         }
     }
     window->startSystemMove();
@@ -2143,12 +2328,7 @@ void WindowService::endMove(QObject *windowObject)
         if (geometry.width() < 320 || geometry.height() < 240)
             return;
         const QString key = keyForWindow(windowObject);
-        m_settings->setValue(QStringLiteral("windows/%1/normalGeometry").arg(key), QVariantMap{
-            {QStringLiteral("x"), geometry.x()},
-            {QStringLiteral("y"), geometry.y()},
-            {QStringLiteral("w"), geometry.width()},
-            {QStringLiteral("h"), geometry.height()},
-        });
+        m_settings->setValue(QStringLiteral("windows/%1/normalGeometry").arg(key), contentGeometryMap(geometry, window));
     };
     const auto restoreNormalGeometry = [&]() {
         if (!moveStartedFromSnapped)
@@ -2161,11 +2341,7 @@ void WindowService::endMove(QObject *windowObject)
         if (!savedGeometry.canConvert<QVariantMap>())
             return;
         const QVariantMap map = savedGeometry.toMap();
-        QRect geometry(
-            map.value(QStringLiteral("x")).toInt(),
-            map.value(QStringLiteral("y")).toInt(),
-            map.value(QStringLiteral("w")).toInt(),
-            map.value(QStringLiteral("h")).toInt());
+        QRect geometry = scaleSavedContentGeometryForCurrentDpr(map, window);
         if (geometry.width() < 320 || geometry.height() < 240)
             return;
         const int inset = windowStateGeometryInset(windowObject);
@@ -2196,9 +2372,9 @@ void WindowService::endMove(QObject *windowObject)
     if (qAbs(cursor.x() - available.left()) <= tolerance) {
         cancelWindowManagerMoveResize(window);
         saveNormalGeometry();
-        window->showNormal();
         windowObject->setProperty("snappedVisual", true);
         const QRect content(available.left(), available.top(), available.width() / 2, available.height());
+        window->showNormal();
         window->setGeometry(outerGeometryForContent(windowObject, content));
         cancelWindowManagerMoveResize(window);
         clearMoveProperties();
@@ -2207,10 +2383,10 @@ void WindowService::endMove(QObject *windowObject)
     if (qAbs(cursor.x() - available.right()) <= tolerance) {
         cancelWindowManagerMoveResize(window);
         saveNormalGeometry();
-        window->showNormal();
         windowObject->setProperty("snappedVisual", true);
         const int width = available.width() / 2;
         const QRect content(available.right() - width + 1, available.top(), width, available.height());
+        window->showNormal();
         window->setGeometry(outerGeometryForContent(windowObject, content));
         cancelWindowManagerMoveResize(window);
         clearMoveProperties();
@@ -2255,18 +2431,14 @@ void WindowService::restoreNativeManagedWindowState(QObject *windowObject)
     const QVariant savedGeometry = m_settings->value(QStringLiteral("windows/%1/normalGeometry").arg(key));
     if (savedGeometry.canConvert<QVariantMap>()) {
         const QVariantMap map = savedGeometry.toMap();
-        QRect geometry(
-            map.value(QStringLiteral("x")).toInt(),
-            map.value(QStringLiteral("y")).toInt(),
-            map.value(QStringLiteral("w")).toInt(),
-            map.value(QStringLiteral("h")).toInt());
+        QRect geometry = scaleSavedContentGeometryForCurrentDpr(map, window);
         if (geometry.width() >= 320 && geometry.height() >= 240) {
             if (QScreen *screen = window->screen() ? window->screen() : QGuiApplication::primaryScreen()) {
                 const QRect available = screen->availableGeometry().adjusted(-geometry.width() + 120, -geometry.height() + 80, geometry.width() - 120, geometry.height() - 80);
                 if (!available.intersects(geometry))
                     geometry.moveCenter(screen->availableGeometry().center());
             }
-            window->setGeometry(geometry);
+            window->setGeometry(outerGeometryForContent(windowObject, geometry));
         }
     }
 
@@ -2305,12 +2477,7 @@ void WindowService::saveWindowState(QObject *windowObject)
         if (inset > 0 && geometry.width() > inset * 2 && geometry.height() > inset * 2)
             geometry = geometry.adjusted(inset, inset, -inset, -inset);
         if (geometry.width() >= 320 && geometry.height() >= 240) {
-            m_settings->setValue(QStringLiteral("windows/%1/normalGeometry").arg(key), QVariantMap{
-                {QStringLiteral("x"), geometry.x()},
-                {QStringLiteral("y"), geometry.y()},
-                {QStringLiteral("w"), geometry.width()},
-                {QStringLiteral("h"), geometry.height()},
-            });
+            m_settings->setValue(QStringLiteral("windows/%1/normalGeometry").arg(key), contentGeometryMap(geometry, window));
         }
     }
     m_settings->setValue(QStringLiteral("windows/%1/visibility").arg(key), visibility);

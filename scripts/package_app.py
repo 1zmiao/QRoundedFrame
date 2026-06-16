@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -52,6 +53,14 @@ QT_QML_MODULE_DIRS = [
     "QtQuick/Templates",
     "QtQuick/Window",
     "Qt/labs/platform",
+]
+
+
+LINUX_RUNTIME_APP_FILES = [
+    "__init__.py",
+    "memory_snapshot.py",
+    "window_policy.py",
+    "windows_compat.py",
 ]
 
 
@@ -163,7 +172,81 @@ def prune_release(release_dir: Path) -> None:
             shutil.rmtree(path, ignore_errors=True)
 
 
-def package(root: Path, app_name: str, dist_dir: Path, clean: bool) -> Path:
+def write_linux_launcher(release_dir: Path, app_name: str) -> None:
+    launcher = release_dir / "run.sh"
+    launcher.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+        'export QROUNDEDFRAME_ROOT="${QROUNDEDFRAME_ROOT:-$ROOT}"\n'
+        'exec "$ROOT/bin/' + app_name + '" "$@"\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    launcher.chmod(0o755)
+
+
+def write_linux_desktop_file(release_dir: Path, app_name: str) -> None:
+    desktop = release_dir / f"{app_name}.desktop"
+    desktop.write_text(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        f"Name={app_name}\n"
+        f"Exec={release_dir / 'run.sh'}\n"
+        f"Icon={release_dir / 'resources' / 'app_icon.ico'}\n"
+        "Terminal=false\n"
+        "Categories=Utility;\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def copy_linux_runtime_app(root: Path, release_dir: Path) -> None:
+    app_dst = release_dir / "app"
+    app_dst.mkdir(parents=True, exist_ok=True)
+    for name in LINUX_RUNTIME_APP_FILES:
+        source = root / "app" / name
+        if source.exists():
+            copy_file(source, app_dst / name)
+    copy_tree(root / "app" / "workers", app_dst / "workers")
+    copy_tree(root / "app" / "prebuilt", app_dst / "prebuilt")
+
+
+def check_linux_prebuilt(root: Path) -> None:
+    for variant in ("system", "custom"):
+        base = root / "app" / "prebuilt" / f"linux-x64-qt6.11-{variant}" / "qml" / "FramelessNative"
+        for name in ("qmldir", "FramelessNative.qmltypes", "libFramelessNative.so", "libFramelessNativeplugin.so"):
+            if not (base / name).exists():
+                raise FileNotFoundError(base / name)
+
+
+def package_linux(root: Path, app_name: str, dist_dir: Path, clean: bool) -> Path:
+    if clean:
+        remove_tree(dist_dir / app_name)
+
+    run([sys.executable, "scripts/check_text_encoding.py"], root)
+    run(["bash", str(root / "app" / "cpp" / "frameless_native" / "build_linux.sh")], root)
+    check_linux_prebuilt(root)
+    run(["bash", str(root / "app" / "cpp" / "ui_runtime" / "build_linux.sh")], root)
+
+    release_dir = dist_dir / app_name
+    bin_dir = release_dir / "bin"
+    release_dir.mkdir(parents=True, exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    copy_file(root / "build" / "cpp_ui" / "linux" / "bin" / "QRoundedFrame", bin_dir / app_name)
+    copy_tree(root / "qml", release_dir / "qml")
+    copy_tree(root / "resources" / "icons", release_dir / "resources" / "icons")
+    copy_tree(root / "resources" / "images", release_dir / "resources" / "images")
+    copy_file(root / "resources" / "app_icon.ico", release_dir / "resources" / "app_icon.ico")
+    copy_linux_runtime_app(root, release_dir)
+    write_linux_launcher(release_dir, app_name)
+    write_linux_desktop_file(release_dir, app_name)
+    prune_release(release_dir)
+    return release_dir
+
+
+def package_windows(root: Path, app_name: str, dist_dir: Path, clean: bool) -> Path:
     if clean:
         remove_tree(dist_dir / app_name)
 
@@ -191,10 +274,23 @@ def package(root: Path, app_name: str, dist_dir: Path, clean: bool) -> Path:
     return release_dir
 
 
+def package(root: Path, app_name: str, dist_dir: Path, clean: bool, target: str) -> Path:
+    if target == "linux":
+        return package_linux(root, app_name, dist_dir, clean)
+    if target == "windows":
+        return package_windows(root, app_name, dist_dir, clean)
+    raise ValueError(f"Unsupported package target: {target}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Package the C++ Qt Quick UI runtime.")
     parser.add_argument("--name", default=os.environ.get("APP_NAME", APP_NAME))
     parser.add_argument("--dist", default=os.environ.get("DIST_DIR", "dist"))
+    parser.add_argument(
+        "--target",
+        choices=("windows", "linux"),
+        default=os.environ.get("PACKAGE_TARGET") or ("windows" if platform.system() == "Windows" else "linux"),
+    )
     parser.add_argument("--no-clean", action="store_true", help="Do not delete previous package output first.")
     args = parser.parse_args()
 
@@ -204,9 +300,13 @@ def main() -> int:
         app_name=args.name,
         dist_dir=(root / args.dist).resolve(),
         clean=not args.no_clean,
+        target=args.target,
     )
     print()
-    print(f"Packaged: {release_dir / (args.name + '.exe')}")
+    if args.target == "windows":
+        print(f"Packaged: {release_dir / (args.name + '.exe')}")
+    else:
+        print(f"Packaged: {release_dir / 'run.sh'}")
     return 0
 
 

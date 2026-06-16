@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QPointer>
+#include <QFileSystemWatcher>
 #include <QHash>
 #include <QUrl>
 #include <QQmlComponent>
@@ -54,6 +55,7 @@ class RuntimeTheme : public QObject {
     Q_PROPERTY(QString mode READ mode NOTIFY modeChanged)
     Q_PROPERTY(QString primaryColor READ primaryColor NOTIFY primaryColorChanged)
     Q_PROPERTY(double fontScale READ fontScale NOTIFY fontScaleChanged)
+    Q_PROPERTY(double systemUiScale READ systemUiScale NOTIFY systemUiScaleChanged)
     Q_PROPERTY(bool showColorButton READ showColorButton NOTIFY showColorButtonChanged)
     Q_PROPERTY(double rippleX READ rippleX NOTIFY rippleOriginChanged)
     Q_PROPERTY(double rippleY READ rippleY NOTIFY rippleOriginChanged)
@@ -62,6 +64,7 @@ public:
     QString mode() const { return m_mode; }
     QString primaryColor() const { return m_mode == QLatin1String("dark") ? m_darkPrimaryColor : m_lightPrimaryColor; }
     double fontScale() const { return m_fontScale; }
+    double systemUiScale() const { return m_systemUiScale; }
     bool showColorButton() const { return m_showColorButton; }
     double rippleX() const { return m_rippleX; }
     double rippleY() const { return m_rippleY; }
@@ -84,17 +87,26 @@ signals:
     void primaryColorChanged(const QString &color);
     void primaryColorCommitted(const QString &color);
     void fontScaleChanged();
+    void systemUiScaleChanged();
     void showColorButtonChanged();
     void rippleOriginChanged(double x, double y);
 private:
+    void installSystemUiScaleWatcher();
+    void refreshSystemUiScale();
+    void refreshSystemUiScaleWatcherPaths();
     RuntimeSettings *m_settings = nullptr;
     QString m_mode = QStringLiteral("dark");
     QString m_lightPrimaryColor = QStringLiteral("#5886D9");
     QString m_darkPrimaryColor = QStringLiteral("#3A3FAC");
     double m_fontScale = 1.0;
+    double m_systemUiScale = 1.0;
     bool m_showColorButton = true;
     double m_rippleX = 0.0;
     double m_rippleY = 0.0;
+    QFileSystemWatcher m_systemUiScaleWatcher;
+    QString m_kdeConfigDir;
+    QString m_kdeGlobalsPath;
+    QString m_kcmFontsPath;
 };
 
 class RuntimePerformance : public QObject {

@@ -19,8 +19,7 @@ build_output.txt
 run_smoke.out
 run_smoke.err
 
-# Editor / OS noise
-.vscode/
+# Editor / OS noise (keep VS Code config included)
 .DS_Store
 Thumbs.db
 # Native link-only artifacts; runtime uses DLL/qmldir/qmltypes/resource map

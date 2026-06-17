@@ -28,12 +28,12 @@
 #endif
 
 #if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
-#    include "native_window_agent_linux_p.h"
 #    include <QtGui/QGuiApplication>
 #    include <xcb/xcb.h>
 #    include <X11/Xlib.h>
 #    include <X11/Xatom.h>
 #    include <X11/extensions/shape.h>
+#    include "native_window_agent_linux_p.h"
 #endif
 
 #ifdef Q_OS_WIN

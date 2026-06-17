@@ -55,6 +55,51 @@ QT_QML_MODULE_DIRS = [
     "Qt/labs/platform",
 ]
 
+LINUX_QT_LIBS = [
+    "libQt6Core.so.6",
+    "libQt6Gui.so.6",
+    "libQt6LabsPlatform.so.6",
+    "libQt6Network.so.6",
+    "libQt6OpenGL.so.6",
+    "libQt6Qml.so.6",
+    "libQt6QmlMeta.so.6",
+    "libQt6QmlModels.so.6",
+    "libQt6QmlWorkerScript.so.6",
+    "libQt6Quick.so.6",
+    "libQt6QuickControls2.so.6",
+    "libQt6QuickControls2Basic.so.6",
+    "libQt6QuickControls2BasicStyleImpl.so.6",
+    "libQt6QuickControls2Impl.so.6",
+    "libQt6QuickLayouts.so.6",
+    "libQt6QuickTemplates2.so.6",
+    "libQt6Sql.so.6",
+    "libQt6Svg.so.6",
+    "libQt6Widgets.so.6",
+    "libQt6Concurrent.so.6",
+    "libQt6DBus.so.6",
+]
+LINUX_QT_PLUGIN_DIRS = [
+    "platforms",
+    "imageformats",
+    "iconengines",
+    "styles",
+    "tls",
+    "platforminputcontexts",
+    "xcbglintegrations",
+]
+LINUX_QT_QML_MODULE_DIRS = [
+    "QtCore",
+    "QtQml",
+    "QtQuick",
+    "QtQuick/Controls",
+    "QtQuick/Controls/Basic",
+    "QtQuick/Controls/Basic/impl",
+    "QtQuick/Controls/impl",
+    "QtQuick/Layouts",
+    "QtQuick/Templates",
+    "QtQuick/Window",
+    "Qt/labs/platform",
+]
 
 LINUX_RUNTIME_APP_FILES = [
     "__init__.py",
@@ -118,6 +163,110 @@ def copy_qt_runtime(qt: Path, release_dir: Path) -> None:
             copy_tree(source, release_dir / "qml" / name)
 
 
+def find_linux_qt_dirs() -> tuple[Path, Path, Path]:
+    qt_prefix_env = os.environ.get("FRAMELESS_QT_PREFIX", "").strip()
+    if qt_prefix_env:
+        prefix = Path(qt_prefix_env)
+        lib_dir = prefix / "lib"
+        plugins_dir = prefix / "plugins"
+        qml_dir = prefix / "qml"
+        if lib_dir.exists() and plugins_dir.exists():
+            return lib_dir, plugins_dir, qml_dir
+
+    try:
+        result = subprocess.run(
+            ["qtpaths6", "--qt-query", "QT_INSTALL_LIBS"],
+            capture_output=True, text=True, check=True,
+        )
+        lib_dir = Path(result.stdout.strip())
+        result = subprocess.run(
+            ["qtpaths6", "--qt-query", "QT_INSTALL_PLUGINS"],
+            capture_output=True, text=True, check=True,
+        )
+        plugins_dir = Path(result.stdout.strip())
+        result = subprocess.run(
+            ["qtpaths6", "--qt-query", "QT_INSTALL_QML"],
+            capture_output=True, text=True, check=True,
+        )
+        qml_dir = Path(result.stdout.strip())
+        return lib_dir, plugins_dir, qml_dir
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    candidate = Path("/usr/lib/x86_64-linux-gnu")
+    if (candidate / "libQt6Core.so.6").exists():
+        return candidate, candidate / "qt6" / "plugins", candidate / "qt6" / "qml"
+    raise FileNotFoundError(
+        "Qt 6 runtime not found. Set FRAMELESS_QT_PREFIX or install Qt 6 development packages."
+    )
+
+
+def _prune_unnecessary_qt(release_dir: Path) -> None:
+    unnecessary_qml_subdirs = [
+        "QtQuick/VirtualKeyboard",
+        "QtQuick/Particles",
+        "QtQuick/Shapes",
+        "QtQuick/Effects",
+        "QtQuick/VectorImage",
+        "QtQuick/tooling",
+        "QtQuick/LocalStorage",
+        "QtQuick/Dialogs",
+        "QtQuick/NativeStyle",
+    ]
+    for name in unnecessary_qml_subdirs:
+        path = release_dir / "qml" / name
+        if path.exists():
+            shutil.rmtree(path)
+
+    unnecessary_qml_styles = [
+        "QtQuick/Controls/designer",
+        "QtQuick/Controls/Fusion",
+        "QtQuick/Controls/Imagine",
+        "QtQuick/Controls/Material",
+        "QtQuick/Controls/Universal",
+    ]
+    for name in unnecessary_qml_styles:
+        path = release_dir / "qml" / name
+        if path.exists():
+            shutil.rmtree(path)
+
+    img_dir = release_dir / "plugins" / "imageformats"
+    if img_dir.exists():
+        for f in list(img_dir.iterdir()):
+            if f.name.startswith("kimg_"):
+                f.unlink()
+
+
+def copy_linux_qt_runtime(release_dir: Path) -> None:
+    lib_dir, plugins_dir, qml_dir = find_linux_qt_dirs()
+
+    lib_dst = release_dir / "lib"
+    lib_dst.mkdir(parents=True, exist_ok=True)
+    for so_name in LINUX_QT_LIBS:
+        source = lib_dir / so_name
+        if source.exists():
+            shutil.copy2(source, lib_dst / so_name, follow_symlinks=True)
+        else:
+            print(f"  [warn] Qt library not found: {source}")
+
+    plugins_dst = release_dir / "plugins"
+    for name in LINUX_QT_PLUGIN_DIRS:
+        source = plugins_dir / name
+        if source.exists():
+            copy_tree(source, plugins_dst / name)
+
+    sqlite_driver = plugins_dir / "sqldrivers" / "libqsqlite.so"
+    if sqlite_driver.exists():
+        copy_file(sqlite_driver, plugins_dst / "sqldrivers" / "libqsqlite.so")
+
+    for name in LINUX_QT_QML_MODULE_DIRS:
+        source = qml_dir / name
+        if source.exists():
+            copy_tree(source, release_dir / "qml" / name)
+
+    _prune_unnecessary_qt(release_dir)
+
+
 def build_launcher(root: Path, output: Path) -> None:
     source = root / "app" / "cpp" / "launcher" / "launcher.cpp"
     resource = root / "app" / "cpp" / "launcher" / "launcher.rc"
@@ -179,6 +328,9 @@ def write_linux_launcher(release_dir: Path, app_name: str) -> None:
         "set -euo pipefail\n"
         'ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
         'export QROUNDEDFRAME_ROOT="$ROOT"\n'
+        'export LD_LIBRARY_PATH="$ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
+        'export QT_PLUGIN_PATH="$ROOT/plugins"\n'
+        'export QML2_IMPORT_PATH="$ROOT/qml"\n'
         'exec "$ROOT/bin/' + app_name + '" "$@"\n',
         encoding="utf-8",
         newline="\n",
@@ -240,6 +392,11 @@ def package_linux(root: Path, app_name: str, dist_dir: Path, clean: bool) -> Pat
     copy_tree(root / "resources" / "images", release_dir / "resources" / "images")
     copy_file(root / "resources" / "app_icon.ico", release_dir / "resources" / "app_icon.ico")
     copy_linux_runtime_app(root, release_dir)
+    copy_linux_qt_runtime(release_dir)
+    for stale in ("runtime", "QRoundedFrame.exe"):
+        p = release_dir / stale
+        if p.exists():
+            remove_tree(p) if p.is_dir() else p.unlink()
     write_linux_launcher(release_dir, app_name)
     write_linux_desktop_file(release_dir, app_name)
     prune_release(release_dir)

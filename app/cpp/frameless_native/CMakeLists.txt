@@ -76,6 +76,8 @@ set_target_properties(FramelessNative PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${FRAMELESS_NATIVE_QML_OUTPUT_DIR}/FramelessNative"
     LIBRARY_OUTPUT_DIRECTORY "${FRAMELESS_NATIVE_QML_OUTPUT_DIR}/FramelessNative"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    BUILD_RPATH "$ORIGIN"
+    INSTALL_RPATH "$ORIGIN"
 )
 
 target_include_directories(FramelessNative PRIVATE

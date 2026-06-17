@@ -1,8 +1,6 @@
 #include "native_window_agent.h"
 
 #if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
-#include "native_window_agent_linux_p.h"
-
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDebug>
 #include <QtCore/QDir>
@@ -19,6 +17,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/extensions/shape.h>
+#include "native_window_agent_linux_p.h"
 
 #include <cmath>
 

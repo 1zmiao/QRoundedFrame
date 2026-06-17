@@ -21,6 +21,7 @@
 
 #ifdef Q_OS_LINUX
 #include <malloc.h>
+#include <dlfcn.h>
 #endif
 
 #ifdef Q_OS_WIN
@@ -334,6 +335,16 @@ int main(int argc, char *argv[])
 #ifdef Q_OS_WIN
     SetDllDirectoryW(reinterpret_cast<LPCWSTR>(nativePluginDir.utf16()));
     qputenv("PATH", QDir::toNativeSeparators(nativePluginDir).toLocal8Bit() + ";" + qgetenv("PATH"));
+#elif defined(Q_OS_LINUX)
+    const QString nativeLibPath = QDir(nativePluginDir).absoluteFilePath(QStringLiteral("libFramelessNative.so"));
+    if (QFile::exists(nativeLibPath)) {
+        if (dlopen(nativeLibPath.toUtf8().constData(), RTLD_LAZY | RTLD_GLOBAL)) {
+            appendLog(QStringLiteral("preloaded native lib: %1").arg(nativeLibPath));
+        } else {
+            appendLog(QStringLiteral("failed to preload native lib: %1 - %2")
+                          .arg(nativeLibPath, QString::fromUtf8(dlerror())));
+        }
+    }
 #endif
 
     appendLog(QStringLiteral("root=%1").arg(root));

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SRC="$ROOT/app/cpp/ui_runtime"
 BUILD="$ROOT/build/cpp_ui/linux"

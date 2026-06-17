@@ -808,8 +808,12 @@ void ExternalShadowController::syncNativeRegisteredShadow(WId targetId, bool sta
     auto it = m_nativeShadowByTarget.find(targetId);
     if (it == m_nativeShadowByTarget.end())
         return;
+#ifdef Q_OS_WIN
+    const QRect rect = nativeTargetRect(targetId);
+#else
     const NativeShadowState &state = it.value();
     const QRect rect = state.target ? nativeWindowRect(state.target) : nativeTargetRect(targetId);
+#endif
     syncNativeRegisteredShadow(targetId, rect, stackBehind, forceRepaint);
 }
 
@@ -1014,7 +1018,11 @@ bool ExternalShadowController::shouldShowNativeShadow(const NativeShadowState &s
     if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd) || IsZoomed(hwnd))
         return false;
 #endif
+#ifdef Q_OS_WIN
+    const QRect rect = nativeTargetRect(targetId);
+#else
     const QRect rect = state.target ? nativeWindowRect(state.target) : nativeTargetRect(targetId);
+#endif
     return rect.isValid() && rect.width() > 0 && rect.height() > 0;
 }
 

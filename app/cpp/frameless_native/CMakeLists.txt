@@ -65,6 +65,13 @@ qt_add_qml_module(FramelessNative
         src/native_window_agent.cpp
 )
 
+if(UNIX AND NOT APPLE)
+    target_sources(FramelessNative PRIVATE
+        src/native_window_agent_linux_p.h
+        src/native_window_agent_linux.cpp
+    )
+endif()
+
 set_target_properties(FramelessNative PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${FRAMELESS_NATIVE_QML_OUTPUT_DIR}/FramelessNative"
     LIBRARY_OUTPUT_DIRECTORY "${FRAMELESS_NATIVE_QML_OUTPUT_DIR}/FramelessNative"

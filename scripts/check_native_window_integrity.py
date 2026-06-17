@@ -83,9 +83,13 @@ def check_native_agent() -> None:
             fail(f"{rel(path)} is missing required custom-path guard/code: {needle}")
     if "const DWORD ncPolicy = 1" in text:
         fail(f"{rel(path)} must keep DWM non-client rendering enabled on the custom path; disabling it can expose classic Win10 frame artifacts.")
-    resize_block = "case QEvent::Resize:\n#ifdef Q_OS_WIN\n            if (m_inNativeSizeMove) {\n                fillWindowBackground();\n            } else\n#endif\n            {\n                applyWindowRegion(false);\n            }"
-    if resize_block not in text:
-        fail(f"{rel(path)} must not update SetWindowRgn from QEvent::Resize while native interactive resize is active.")
+    resize_start = text.find("case QEvent::Resize:")
+    resize_end = text.find("break;", resize_start)
+    resize_block = text[resize_start:resize_end] if resize_start >= 0 and resize_end > resize_start else ""
+    if "m_inNativeSizeMove" not in resize_block or "fillWindowBackground();" not in resize_block:
+        fail(f"{rel(path)} must fill the class background during native interactive resize.")
+    if "applyWindowRegion" in resize_block.split("m_inNativeSizeMove", 1)[0]:
+        fail(f"{rel(path)} must not update SetWindowRgn before checking native interactive resize state.")
     for forbidden_resize_backing in [
         "resizeBackingWindowClassName",
         "m_resizeBackingHwnd",
@@ -325,8 +329,11 @@ def check_external_shadow() -> None:
 def check_qml_shadow_path() -> None:
     path = ROOT / "qml" / "window" / "AppWindow.qml"
     text = read_text(path)
-    required = [        "property bool nativeExternalShadow: customExternalShadow && Qt.platform.os === \"windows\"",
-        "property bool qmlExternalShadow: customExternalShadow && !nativeExternalShadow",
+    required = [
+        "property bool nativeExternalShadow: customExternalShadow && Qt.platform.os === \"windows\"",
+        "property bool qmlExternalShadow: customExternalShadow",
+        "&& !nativeExternalShadow",
+        "&& !linuxCsdShadow",
         "| Qt.WindowSystemMenuHint",
         "| Qt.WindowMinimizeButtonHint",
         "| Qt.WindowMaximizeButtonHint",
@@ -443,8 +450,12 @@ def check_qml_shadow_path() -> None:
 
     native_agent_path = NATIVE_SRC / "native_window_agent.cpp"
     native_agent_text = read_text(native_agent_path)
-    if "setResizeHitTestInsets(6, 8)" not in native_agent_text:
-        fail(f"{rel(native_agent_path)} must use 6px edges and 8px corners for QWindowKit resize hit testing.")
+    native_agent_header = read_text(NATIVE_SRC / "native_window_agent.h")
+    theme_text = read_text(ROOT / "qml" / "core" / "Theme.qml")
+    if "int m_resizeEdgeInset = 6;" not in native_agent_header or "int m_resizeCornerInset = 8;" not in native_agent_header:
+        fail(f"{rel(native_agent_path)} must default QWindowKit resize hit testing to 6px edges and 8px corners.")
+    if "property int resizeEdgeInset: 6" not in theme_text or "property int resizeCornerInset: 8" not in theme_text:
+        fail("qml/core/Theme.qml must expose 6px edges and 8px corners for resize hit testing.")
     for needle in [
         "m_resizeEdgeInset",
         "m_resizeCornerInset",

@@ -554,7 +554,7 @@ Module {
     }
     Component {
         file: "native_window_agent.h"
-        lineNumber: 16
+        lineNumber: 17
         name: "NativeWindowAgent"
         accessSemantics: "reference"
         prototype: "QAbstractNativeEventFilter"
@@ -566,81 +566,117 @@ Module {
             read: "nativeSizeMoveActive"
             notify: "nativeSizeMoveActiveChanged"
             index: 0
-            lineNumber: 19
+            lineNumber: 20
             isReadonly: true
         }
-        Signal { name: "nativeSizeMoveActiveChanged"; lineNumber: 41 }
+        Property {
+            name: "nativeSystemMoveActive"
+            type: "bool"
+            read: "nativeSystemMoveActive"
+            notify: "nativeSystemMoveActiveChanged"
+            index: 1
+            lineNumber: 21
+            isReadonly: true
+        }
+        Property {
+            name: "nativeSystemMoveFromMaximized"
+            type: "bool"
+            read: "nativeSystemMoveFromMaximized"
+            notify: "nativeSystemMoveActiveChanged"
+            index: 2
+            lineNumber: 22
+            isReadonly: true
+        }
+        Property {
+            name: "effectiveDevicePixelRatio"
+            type: "double"
+            read: "effectiveDevicePixelRatio"
+            notify: "effectiveDevicePixelRatioChanged"
+            index: 3
+            lineNumber: 23
+            isReadonly: true
+        }
+        Signal { name: "nativeSizeMoveActiveChanged"; lineNumber: 57 }
+        Signal { name: "nativeSystemMoveActiveChanged"; lineNumber: 58 }
         Signal {
             name: "nativeSystemButtonHoverChanged"
-            lineNumber: 42
+            lineNumber: 59
             Parameter { name: "role"; type: "QString" }
         }
+        Signal { name: "nativeSystemMoveFinished"; lineNumber: 60 }
+        Signal { name: "effectiveDevicePixelRatioChanged"; lineNumber: 61 }
         Method {
             name: "setup"
-            lineNumber: 25
+            lineNumber: 29
             Parameter { name: "window"; type: "QQuickWindow"; isPointer: true }
         }
-        Method { name: "teardown"; lineNumber: 26 }
+        Method { name: "teardown"; lineNumber: 30 }
         Method {
             name: "setTitleBar"
-            lineNumber: 27
+            lineNumber: 34
             Parameter { name: "item"; type: "QQuickItem"; isPointer: true }
         }
         Method {
             name: "setSystemButton"
-            lineNumber: 28
+            lineNumber: 35
             Parameter { name: "role"; type: "QString" }
             Parameter { name: "item"; type: "QQuickItem"; isPointer: true }
         }
         Method {
             name: "setHitTestVisible"
-            lineNumber: 29
+            lineNumber: 36
             Parameter { name: "item"; type: "QQuickItem"; isPointer: true }
             Parameter { name: "visible"; type: "bool" }
         }
         Method {
             name: "setCustomShadowEnabled"
-            lineNumber: 30
+            lineNumber: 37
             Parameter { name: "enabled"; type: "bool" }
         }
         Method {
             name: "setCornerRadius"
-            lineNumber: 31
+            lineNumber: 38
             Parameter { name: "radius"; type: "int" }
         }
         Method {
             name: "setShadowAsset"
-            lineNumber: 32
+            lineNumber: 39
             Parameter { name: "source"; type: "QUrl" }
             Parameter { name: "margin"; type: "int" }
             Parameter { name: "opacity"; type: "double" }
         }
         Method {
             name: "setShellBackgroundColor"
-            lineNumber: 33
+            lineNumber: 40
             Parameter { name: "color"; type: "QColor" }
         }
         Method {
             name: "setResizeHitTestInsets"
-            lineNumber: 34
+            lineNumber: 41
             Parameter { name: "edgeInset"; type: "int" }
             Parameter { name: "cornerInset"; type: "int" }
         }
         Method {
+            name: "effectiveDevicePixelRatio"
+            type: "double"
+            isMethodConstant: true
+            lineNumber: 45
+        }
+        Method {
             name: "setFastExitOnClose"
-            lineNumber: 35
+            lineNumber: 46
             Parameter { name: "enabled"; type: "bool" }
         }
         Method {
             name: "isMaximized"
             type: "bool"
             isMethodConstant: true
-            lineNumber: 36
+            lineNumber: 47
             Parameter { name: "window"; type: "QQuickWindow"; isPointer: true }
         }
         Method {
             name: "toggleMaximized"
-            lineNumber: 37
+            lineNumber: 48
             Parameter { name: "window"; type: "QQuickWindow"; isPointer: true }
         }
     }

@@ -9,7 +9,7 @@ win-x64-qt6.11-system  # Windows 11 等可信系统圆角/阴影路径
 win-x64-qt6.11-custom  # Windows 10、虚拟机、Basic Display 等自定义圆角/阴影路径
 ```
 
-Linux 编译后也放在同一个父目录下，例如：
+当前仓库也保留 Linux x64 / Qt 6.11 的两套预编译模块：
 
 ```text
 linux-x64-qt6.11-system

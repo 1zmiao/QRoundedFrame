@@ -40,6 +40,12 @@ Item {
         if (root.appReady && App.theme)
             App.theme.setFontScale(fontSlider.value / 100.0)
     }
+    function fontSliderValue() {
+        return Math.round(Core.Theme.fontScale * 100 / 5) * 5
+    }
+    function syncFontSlider() {
+        fontSlider.value = root.fontSliderValue()
+    }
 
     DragScrollArea {
         anchors.fill: parent
@@ -113,11 +119,11 @@ Item {
                         to: 130
                         stepSize: 5
                         tickCount: 10
-                        value: Math.round(Core.Theme.fontScale * 100 / 5) * 5
+                        value: root.fontSliderValue()
                         onMoved: root.commitFontSlider()
                         onCommitted: root.commitFontSlider()
                     }
-                    Connections { target: root.appReady && App.theme ? App.theme : null; function onFontScaleChanged(scale) { fontSlider.value = Math.round(scale * 100 / fontSlider.stepSize) * fontSlider.stepSize } }
+                    Connections { target: root.appReady && App.theme ? App.theme : null; function onFontScaleChanged() { Qt.callLater(root.syncFontSlider) } }
                     Row {
                         width: parent.width
                         spacing: 0

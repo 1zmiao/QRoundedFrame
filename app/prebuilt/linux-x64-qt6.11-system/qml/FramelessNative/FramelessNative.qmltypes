@@ -496,14 +496,31 @@ Module {
             isReadonly: true
         }
         Property {
+            name: "nativeSystemMoveActive"
+            type: "bool"
+            read: "nativeSystemMoveActive"
+            notify: "nativeSystemMoveActiveChanged"
+            index: 1
+            isReadonly: true
+        }
+        Property {
+            name: "nativeSystemMoveFromMaximized"
+            type: "bool"
+            read: "nativeSystemMoveFromMaximized"
+            notify: "nativeSystemMoveActiveChanged"
+            index: 2
+            isReadonly: true
+        }
+        Property {
             name: "effectiveDevicePixelRatio"
             type: "double"
             read: "effectiveDevicePixelRatio"
             notify: "effectiveDevicePixelRatioChanged"
-            index: 1
+            index: 3
             isReadonly: true
         }
         Signal { name: "nativeSizeMoveActiveChanged" }
+        Signal { name: "nativeSystemMoveActiveChanged" }
         Signal {
             name: "nativeSystemButtonHoverChanged"
             Parameter { name: "role"; type: "QString" }
@@ -580,6 +597,13 @@ Module {
         Method {
             name: "startSystemMove"
             type: "bool"
+            Parameter { name: "window"; type: "QQuickWindow"; isPointer: true }
+            Parameter { name: "shadowInset"; type: "int" }
+        }
+        Method {
+            name: "startSystemMove"
+            type: "bool"
+            isCloned: true
             Parameter { name: "window"; type: "QQuickWindow"; isPointer: true }
         }
     }

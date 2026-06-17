@@ -2130,7 +2130,11 @@ bool WindowService::isSnappedState(QObject *windowObject) const
     if (!screen)
         return false;
     const QRect available = screen->availableGeometry();
+#ifdef Q_OS_LINUX
     const QRect geometry = managedContentGeometry(windowObject);
+#else
+    const QRect geometry = window->geometry();
+#endif
     const int tolerance = 3;
     const bool fullHeight = qAbs(geometry.top() - available.top()) <= tolerance
         && qAbs(geometry.bottom() - available.bottom()) <= tolerance;
@@ -2153,7 +2157,12 @@ QString WindowService::snapState(QObject *windowObject) const
     if (!window || !screen)
         return QStringLiteral("snapped");
     const QRect available = screen->availableGeometry();
-    return managedContentGeometry(windowObject).center().x() < available.center().x()
+#ifdef Q_OS_LINUX
+    const QRect geometry = managedContentGeometry(windowObject);
+#else
+    const QRect geometry = window->geometry();
+#endif
+    return geometry.center().x() < available.center().x()
         ? QStringLiteral("left")
         : QStringLiteral("right");
 }
@@ -2431,14 +2440,26 @@ void WindowService::restoreNativeManagedWindowState(QObject *windowObject)
     const QVariant savedGeometry = m_settings->value(QStringLiteral("windows/%1/normalGeometry").arg(key));
     if (savedGeometry.canConvert<QVariantMap>()) {
         const QVariantMap map = savedGeometry.toMap();
+#ifdef Q_OS_LINUX
         QRect geometry = scaleSavedContentGeometryForCurrentDpr(map, window);
+#else
+        QRect geometry(
+            map.value(QStringLiteral("x")).toInt(),
+            map.value(QStringLiteral("y")).toInt(),
+            map.value(QStringLiteral("w")).toInt(),
+            map.value(QStringLiteral("h")).toInt());
+#endif
         if (geometry.width() >= 320 && geometry.height() >= 240) {
             if (QScreen *screen = window->screen() ? window->screen() : QGuiApplication::primaryScreen()) {
                 const QRect available = screen->availableGeometry().adjusted(-geometry.width() + 120, -geometry.height() + 80, geometry.width() - 120, geometry.height() - 80);
                 if (!available.intersects(geometry))
                     geometry.moveCenter(screen->availableGeometry().center());
             }
+#ifdef Q_OS_LINUX
             window->setGeometry(outerGeometryForContent(windowObject, geometry));
+#else
+            window->setGeometry(geometry);
+#endif
         }
     }
 
@@ -2472,6 +2493,7 @@ void WindowService::saveWindowState(QObject *windowObject)
     const QString key = keyForWindow(windowObject);
     const QString visibility = visibilityName(window);
     if (visibility == QLatin1String("normal")) {
+#ifdef Q_OS_LINUX
         QRect geometry = window->geometry();
         const int inset = windowStateGeometryInset(windowObject);
         if (inset > 0 && geometry.width() > inset * 2 && geometry.height() > inset * 2)
@@ -2479,6 +2501,17 @@ void WindowService::saveWindowState(QObject *windowObject)
         if (geometry.width() >= 320 && geometry.height() >= 240) {
             m_settings->setValue(QStringLiteral("windows/%1/normalGeometry").arg(key), contentGeometryMap(geometry, window));
         }
+#else
+        const QRect geometry = window->geometry();
+        if (geometry.width() >= 320 && geometry.height() >= 240) {
+            m_settings->setValue(QStringLiteral("windows/%1/normalGeometry").arg(key), QVariantMap{
+                {QStringLiteral("x"), geometry.x()},
+                {QStringLiteral("y"), geometry.y()},
+                {QStringLiteral("w"), geometry.width()},
+                {QStringLiteral("h"), geometry.height()},
+            });
+        }
+#endif
     }
     m_settings->setValue(QStringLiteral("windows/%1/visibility").arg(key), visibility);
     if (!isChildKey(key))

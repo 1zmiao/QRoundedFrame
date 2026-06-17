@@ -8,7 +8,6 @@
 #include <QtCore/QString>
 #include <QtCore/QUrl>
 #include <QtGui/QColor>
-#include <QtGui/QScreen>
 #include <QtQml/qqmlregistration.h>
 #include <QtQuick/QQuickItem>
 #include <QtQuick/QQuickWindow>
@@ -19,6 +18,8 @@ class NativeWindowAgent : public QWK::QuickWindowAgent, public QAbstractNativeEv
     Q_OBJECT
     QML_ELEMENT
     Q_PROPERTY(bool nativeSizeMoveActive READ nativeSizeMoveActive NOTIFY nativeSizeMoveActiveChanged)
+    Q_PROPERTY(bool nativeSystemMoveActive READ nativeSystemMoveActive NOTIFY nativeSystemMoveActiveChanged)
+    Q_PROPERTY(bool nativeSystemMoveFromMaximized READ nativeSystemMoveFromMaximized NOTIFY nativeSystemMoveActiveChanged)
     Q_PROPERTY(qreal effectiveDevicePixelRatio READ effectiveDevicePixelRatio NOTIFY effectiveDevicePixelRatioChanged)
 
 public:
@@ -27,7 +28,9 @@ public:
 
     Q_INVOKABLE void setup(QQuickWindow *window);
     Q_INVOKABLE void teardown();
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
     Q_INVOKABLE void setClientSideShadowMode(bool enabled);
+#endif
     Q_INVOKABLE void setTitleBar(QQuickItem *item);
     Q_INVOKABLE void setSystemButton(const QString &role, QQuickItem *item);
     Q_INVOKABLE void setHitTestVisible(QQuickItem *item, bool visible);
@@ -36,16 +39,23 @@ public:
     Q_INVOKABLE void setShadowAsset(const QUrl &source, int margin, qreal opacity);
     Q_INVOKABLE void setShellBackgroundColor(const QColor &color);
     Q_INVOKABLE void setResizeHitTestInsets(int edgeInset, int cornerInset);
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
     Q_INVOKABLE void setGtkFrameExtents(int left, int top, int right, int bottom);
+#endif
     Q_INVOKABLE qreal effectiveDevicePixelRatio() const;
     Q_INVOKABLE void setFastExitOnClose(bool enabled);
     Q_INVOKABLE bool isMaximized(QQuickWindow *window) const;
     Q_INVOKABLE void toggleMaximized(QQuickWindow *window);
-    Q_INVOKABLE bool startSystemMove(QQuickWindow *window);
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
+    Q_INVOKABLE bool startSystemMove(QQuickWindow *window, int shadowInset = 38);
+#endif
     bool nativeSizeMoveActive() const;
+    bool nativeSystemMoveActive() const;
+    bool nativeSystemMoveFromMaximized() const;
 
 signals:
     void nativeSizeMoveActiveChanged();
+    void nativeSystemMoveActiveChanged();
     void nativeSystemButtonHoverChanged(const QString &role);
     void nativeSystemMoveFinished();
     void effectiveDevicePixelRatioChanged();
@@ -59,19 +69,21 @@ private:
     void applyWindowAttributes();
     void applyWindowRegion(bool redraw = true);
     void applyWindowRegionForNativeSize(int width, int height, bool redraw = false);
-    void applyClientSideShadowInputRegion();
     void clearWindowRegion();
     void fillWindowBackground();
     void installNativeShellFilter();
     void uninstallNativeShellFilter();
     void updateClassBackgroundBrush();
     void restoreClassBackgroundBrush();
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
+    void applyClientSideShadowInputRegion();
     void refreshScreenConnections();
     void installX11RootPropertyListener();
     void installKdeScaleWatcher();
     void refreshKdeScaleWatcherPaths();
     void refreshNativeMetrics(const char *reason = "refresh");
     void traceNativeMetrics(const char *reason) const;
+#endif
     int nativeSystemButtonHitTest(qintptr lParam) const;
     bool nativeItemContainsScreenPoint(QQuickItem *item, qintptr lParam) const;
     bool nativeItemContainsScreenPoint(QQuickItem *item, qintptr lParam, bool extendToTitleBarHeight) const;
@@ -81,13 +93,11 @@ private:
     void setNativeSizeMoveActive(bool active);
 
     QPointer<QQuickWindow> m_window;
-    QPointer<QScreen> m_screen;
     QPointer<QQuickItem> m_titleBarItem;
     QPointer<QQuickItem> m_minimizeButton;
     QPointer<QQuickItem> m_maximizeButton;
     QPointer<QQuickItem> m_closeButton;
     bool m_customShadow = false;
-    bool m_clientSideShadowMode = false;
     bool m_nativeShellFilterInstalled = false;
     quintptr m_backgroundBrush = 0;
     quintptr m_previousClassBackgroundBrush = 0;
@@ -97,11 +107,22 @@ private:
     bool m_inNativeSizeMove = false;
     int m_resizeEdgeInset = 6;
     int m_resizeCornerInset = 8;
-    QMargins m_gtkFrameExtents;
     int m_pressedNativeButtonHit = 0;
     int m_hoveredNativeButtonHit = 0;
     bool m_fastExitOnClose = false;
+    QColor m_shellBackgroundColor;
+    QUrl m_shadowSource;
+    int m_shadowMargin = 0;
+    qreal m_shadowOpacity = 1.0;
+    void *m_hwnd = nullptr;
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
+    QPointer<QScreen> m_screen;
+    bool m_clientSideShadowMode = false;
+    QMargins m_gtkFrameExtents;
+    int m_linuxCsdFullInset = 0;
     bool m_linuxSystemMoveActive = false;
+    bool m_linuxSystemMoveFromMaximized = false;
+    bool m_linuxSystemMoveExtentsLocked = false;
     bool m_x11RootPropertyListenerInstalled = false;
     QObject *m_kdeScaleWatcher = nullptr;
     QString m_kdeConfigDir;
@@ -109,9 +130,5 @@ private:
     QString m_kcmFontsPath;
     qreal m_lastNativeDpr = 0.0;
     qreal m_x11ResourceDpr = 0.0;
-    QColor m_shellBackgroundColor;
-    QUrl m_shadowSource;
-    int m_shadowMargin = 0;
-    qreal m_shadowOpacity = 1.0;
-    void *m_hwnd = nullptr;
+#endif
 };

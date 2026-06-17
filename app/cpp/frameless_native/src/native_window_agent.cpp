@@ -28,6 +28,7 @@
 #endif
 
 #if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
+#    include "native_window_agent_linux_p.h"
 #    include <QtGui/QGuiApplication>
 #    include <xcb/xcb.h>
 #    include <X11/Xlib.h>
@@ -66,233 +67,6 @@ static int nativeCornerRadiusPx(int radius, HWND hwnd) {
 
 #endif
 
-#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
-static Display *sharedXDisplay() {
-    static Display *display = nullptr;
-    static bool initialized = false;
-    if (!initialized) {
-        initialized = true;
-        display = XOpenDisplay(nullptr);
-    }
-    return display;
-}
-
-static bool canUseX11Shape() {
-    Display *display = sharedXDisplay();
-    if (!display)
-        return false;
-    int eventBase = 0;
-    int errorBase = 0;
-    return QGuiApplication::platformName().compare(QStringLiteral("xcb"), Qt::CaseInsensitive) == 0
-           && XShapeQueryExtension(display, &eventBase, &errorBase);
-}
-
-static qreal normalizedDpr(qreal dpr) {
-    return qMax<qreal>(1.0, dpr > 0.0 ? dpr : 1.0);
-}
-
-static int nativeCornerRadiusPx(int radius, qreal dpr) {
-    if (radius <= 0)
-        return 0;
-    return qMax(1, int(std::lround(qreal(radius) * normalizedDpr(dpr))));
-}
-
-static int nativePx(int value, qreal dpr) {
-    if (value <= 0)
-        return 0;
-    return qMax(1, int(std::lround(qreal(value) * normalizedDpr(dpr))));
-}
-
-static QSize nativeSizePx(const QSize &size, qreal dpr) {
-    if (!size.isValid())
-        return {};
-    const qreal scale = normalizedDpr(dpr);
-    return QSize(qMax(1, int(std::lround(qreal(size.width()) * scale))),
-                 qMax(1, int(std::lround(qreal(size.height()) * scale))));
-}
-
-static QSize x11WindowSizePx(Display *display, Window window) {
-    if (!display || !window)
-        return {};
-    XWindowAttributes attrs = {};
-    if (XGetWindowAttributes(display, window, &attrs) && attrs.width > 0 && attrs.height > 0)
-        return QSize(attrs.width, attrs.height);
-    return {};
-}
-
-static bool dprTraceEnabled() {
-    return qEnvironmentVariableIsSet("QROUNDEDFRAME_DPR_TRACE");
-}
-
-static qreal readXftDpiDpr(Display *display) {
-    if (!display)
-        return 0.0;
-    char *resourceManager = XResourceManagerString(display);
-    if (!resourceManager)
-        return 0.0;
-    const QString text = QString::fromLocal8Bit(resourceManager);
-    const QRegularExpression re(QStringLiteral(R"(^\s*Xft\.dpi:\s*([0-9]+(?:\.[0-9]+)?))"),
-                                QRegularExpression::MultilineOption);
-    const QRegularExpressionMatch match = re.match(text);
-    if (!match.hasMatch())
-        return 0.0;
-    bool ok = false;
-    const qreal dpi = match.captured(1).toDouble(&ok);
-    if (!ok || dpi <= 0.0)
-        return 0.0;
-    return qMax<qreal>(1.0, dpi / 96.0);
-}
-
-static qreal readKdeScaleFactorDpr() {
-    const QString desktop = QStringList{
-        QString::fromLocal8Bit(qgetenv("XDG_CURRENT_DESKTOP")),
-        QString::fromLocal8Bit(qgetenv("XDG_SESSION_DESKTOP")),
-        QString::fromLocal8Bit(qgetenv("DESKTOP_SESSION")),
-    }.join(u';').toLower();
-    if (!desktop.contains(QStringLiteral("kde")) && !desktop.contains(QStringLiteral("plasma")))
-        return 0.0;
-    const QString path = QDir::homePath() + QStringLiteral("/.config/kdeglobals");
-    QSettings settings(path, QSettings::IniFormat);
-    settings.beginGroup(QStringLiteral("KScreen"));
-    const qreal scale = settings.value(QStringLiteral("ScaleFactor"), 0.0).toDouble();
-    const QString screenScaleFactors = settings.value(QStringLiteral("ScreenScaleFactors")).toString();
-    settings.endGroup();
-    if (scale > 0.0)
-        return qMax<qreal>(1.0, scale);
-    const QStringList parts = screenScaleFactors.split(u';', Qt::SkipEmptyParts);
-    for (const QString &part : parts) {
-        const int equals = part.lastIndexOf(u'=');
-        if (equals < 0)
-            continue;
-        bool ok = false;
-        const qreal value = part.mid(equals + 1).toDouble(&ok);
-        if (ok && value > 0.0)
-            return qMax<qreal>(1.0, value);
-    }
-    return 0.0;
-}
-
-static XRectangle makeRect(short x, short y, unsigned short width, unsigned short height) {
-    XRectangle rect = {};
-    rect.x = x;
-    rect.y = y;
-    rect.width = width;
-    rect.height = height;
-    return rect;
-}
-
-static void setGtkFrameExtentsForWindow(QWindow *window, const QMargins &margins, qreal dpr) {
-    Display *display = sharedXDisplay();
-    if (!display || !window || QGuiApplication::platformName().compare(QStringLiteral("xcb"), Qt::CaseInsensitive) != 0)
-        return;
-    const Window xwindow = static_cast<Window>(window->winId());
-    if (!xwindow)
-        return;
-    const Atom atom = XInternAtom(display, "_GTK_FRAME_EXTENTS", False);
-    const long values[4] = {
-        nativePx(margins.left(), dpr),
-        nativePx(margins.right(), dpr),
-        nativePx(margins.top(), dpr),
-        nativePx(margins.bottom(), dpr),
-    };
-    XChangeProperty(display, xwindow, atom, XA_CARDINAL, 32, PropModeReplace,
-                    reinterpret_cast<const unsigned char *>(values), 4);
-    XFlush(display);
-}
-
-static QString linuxDesktopText()
-{
-    const QString desktop = QStringList{
-        QString::fromLocal8Bit(qgetenv("XDG_CURRENT_DESKTOP")),
-        QString::fromLocal8Bit(qgetenv("XDG_SESSION_DESKTOP")),
-        QString::fromLocal8Bit(qgetenv("DESKTOP_SESSION")),
-    }.join(u';').toLower();
-    return desktop;
-}
-
-static bool desktopNeedsNormalWindowType()
-{
-    const QString desktop = linuxDesktopText();
-    return desktop.contains(QStringLiteral("mate"))
-        || desktop.contains(QStringLiteral("xfce"));
-}
-
-static void setX11NormalWindowTypeForDesktop(QWindow *window) {
-    if (!desktopNeedsNormalWindowType() || !window)
-        return;
-    Display *display = sharedXDisplay();
-    if (!display || QGuiApplication::platformName().compare(QStringLiteral("xcb"), Qt::CaseInsensitive) != 0)
-        return;
-    const Window xwindow = static_cast<Window>(window->winId());
-    if (!xwindow)
-        return;
-    const Atom windowType = XInternAtom(display, "_NET_WM_WINDOW_TYPE", False);
-    const Atom normal = XInternAtom(display, "_NET_WM_WINDOW_TYPE_NORMAL", False);
-    XChangeProperty(display, xwindow, windowType, XA_ATOM, 32, PropModeReplace,
-                    reinterpret_cast<const unsigned char *>(&normal), 1);
-    XFlush(display);
-}
-
-static bool sendNetWmMoveResize(QWindow *window) {
-    auto *x11Application = qGuiApp ? qGuiApp->nativeInterface<QNativeInterface::QX11Application>() : nullptr;
-    Display *display = x11Application ? x11Application->display() : nullptr;
-    if (!display || !window
-        || QGuiApplication::platformName().compare(QStringLiteral("xcb"), Qt::CaseInsensitive) != 0) {
-        return false;
-    }
-
-    const Window xwindow = static_cast<Window>(window->winId());
-    if (!xwindow)
-        return false;
-
-    Window rootReturn = 0;
-    Window childReturn = 0;
-    int rootX = 0;
-    int rootY = 0;
-    int winX = 0;
-    int winY = 0;
-    unsigned int mask = 0;
-    if (!XQueryPointer(display, DefaultRootWindow(display), &rootReturn, &childReturn,
-                       &rootX, &rootY, &winX, &winY, &mask)) {
-        return false;
-    }
-
-    XEvent event = {};
-    event.xclient.type = ClientMessage;
-    event.xclient.window = xwindow;
-    event.xclient.message_type = XInternAtom(display, "_NET_WM_MOVERESIZE", False);
-    event.xclient.format = 32;
-    event.xclient.data.l[0] = rootX;
-    event.xclient.data.l[1] = rootY;
-    event.xclient.data.l[2] = 8; // _NET_WM_MOVERESIZE_MOVE
-    event.xclient.data.l[3] = 1; // left mouse button
-    event.xclient.data.l[4] = 1; // normal application source
-
-    XUngrabPointer(display, CurrentTime);
-    const int sent = XSendEvent(display, DefaultRootWindow(display), False,
-                                SubstructureRedirectMask | SubstructureNotifyMask, &event);
-    XFlush(display);
-    return sent != 0;
-}
-
-static void releaseQtMouseGrab(QQuickWindow *window) {
-    if (!window)
-        return;
-    if (QQuickItem *grabber = window->mouseGrabberItem())
-        grabber->ungrabMouse();
-}
-
-static bool prefersEwmhSystemMove() {
-    const QString desktop = linuxDesktopText();
-    return desktop.contains(QStringLiteral("cinnamon"))
-        || desktop.contains(QStringLiteral("mate"))
-        || desktop.contains(QStringLiteral("xfce"))
-        || desktop.contains(QStringLiteral("kde"))
-        || desktop.contains(QStringLiteral("plasma"));
-}
-
-#endif
-
 NativeWindowAgent::NativeWindowAgent(QObject *parent)
     : QWK::QuickWindowAgent(parent)
 {
@@ -302,32 +76,63 @@ NativeWindowAgent::~NativeWindowAgent() {
     teardown();
 }
 
+bool NativeWindowAgent::nativeSystemMoveActive() const {
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
+    return m_linuxSystemMoveActive;
+#else
+    return false;
+#endif
+}
+
+bool NativeWindowAgent::nativeSystemMoveFromMaximized() const {
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
+    return m_linuxSystemMoveFromMaximized;
+#else
+    return false;
+#endif
+}
+
 void NativeWindowAgent::setup(QQuickWindow *window) {
     if (!window)
         return;
     if (m_window && m_window != window) {
         m_window->removeEventFilter(this);
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
         disconnect(m_window.data(), nullptr, this, nullptr);
+#endif
     }
     m_window = window;
     m_window->installEventFilter(this);
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
     connect(m_window.data(), &QWindow::screenChanged, this, [this](QScreen *) {
         refreshScreenConnections();
         refreshNativeMetrics("window-screen-changed");
     });
     if (!m_clientSideShadowMode)
         QWK::QuickWindowAgent::setup(window);
+#else
+    QWK::QuickWindowAgent::setup(window);
+#endif
     m_window->setColor(shellBackgroundColor());
 #ifdef Q_OS_WIN
     m_hwnd = reinterpret_cast<void *>(m_window->winId());
 #endif
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
     if (!m_clientSideShadowMode)
         QWK::QuickWindowAgent::setWindowAttribute(QStringLiteral("no-system-menu"), true);
+#else
+    QWK::QuickWindowAgent::setWindowAttribute(QStringLiteral("no-system-menu"), true);
+    setResizeHitTestInsets(6, 8);
+#endif
     installNativeShellFilter();
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
     refreshScreenConnections();
     installX11RootPropertyListener();
     installKdeScaleWatcher();
     refreshNativeMetrics("setup");
+#else
+    applyWindowAttributes();
+#endif
 }
 
 void NativeWindowAgent::teardown() {
@@ -335,10 +140,14 @@ void NativeWindowAgent::teardown() {
     restoreClassBackgroundBrush();
     if (m_window)
         m_window->removeEventFilter(this);
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
     if (m_screen)
         disconnect(m_screen.data(), nullptr, this, nullptr);
+#endif
     m_window.clear();
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
     m_screen.clear();
+#endif
     m_titleBarItem.clear();
     m_minimizeButton.clear();
     m_maximizeButton.clear();
@@ -346,7 +155,9 @@ void NativeWindowAgent::teardown() {
     m_lastRegionSize = QSize();
     m_lastRegionRadius = -1;
     m_inNativeSizeMove = false;
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
     m_linuxSystemMoveActive = false;
+    m_linuxCsdFullInset = 0;
     m_x11RootPropertyListenerInstalled = false;
     if (m_kdeScaleWatcher) {
         if (auto *watcher = qobject_cast<QFileSystemWatcher *>(m_kdeScaleWatcher)) {
@@ -364,33 +175,31 @@ void NativeWindowAgent::teardown() {
     m_lastNativeDpr = 0.0;
     m_x11ResourceDpr = 0.0;
     m_clientSideShadowMode = false;
+#endif
 #ifdef Q_OS_WIN
     m_hwnd = nullptr;
-#endif
-}
-
-void NativeWindowAgent::setClientSideShadowMode(bool enabled) {
-#ifdef Q_OS_LINUX
-    m_clientSideShadowMode = enabled;
-    applyWindowAttributes();
-#else
-    Q_UNUSED(enabled)
 #endif
 }
 
 void NativeWindowAgent::setTitleBar(QQuickItem *item) {
     if (item) {
         m_titleBarItem = item;
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
         if (!m_clientSideShadowMode)
             QWK::QuickWindowAgent::setTitleBar(item);
+#else
+        QWK::QuickWindowAgent::setTitleBar(item);
+#endif
     }
 }
 
 void NativeWindowAgent::setSystemButton(const QString &role, QQuickItem *item) {
     if (!item)
         return;
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
     if (m_clientSideShadowMode)
         return;
+#endif
     const int button = systemButtonRole(role);
     if (button != QWK::WindowAgentBase::Unknown) {
         QWK::QuickWindowAgent::setSystemButton(
@@ -412,7 +221,13 @@ void NativeWindowAgent::setSystemButton(const QString &role, QQuickItem *item) {
 }
 
 void NativeWindowAgent::setHitTestVisible(QQuickItem *item, bool visible) {
-    if (item && !m_clientSideShadowMode)
+    if (!item)
+        return;
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
+    if (m_clientSideShadowMode)
+        return;
+#endif
+    if (item)
         QWK::QuickWindowAgent::setHitTestVisible(item, visible);
 }
 
@@ -459,20 +274,14 @@ void NativeWindowAgent::setResizeHitTestInsets(int edgeInset, int cornerInset) {
     const int corner = qBound(edge, cornerInset, 96);
     m_resizeEdgeInset = edge;
     m_resizeCornerInset = corner;
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
     if (!m_clientSideShadowMode) {
         setWindowAttribute(QStringLiteral("qrounded-resize-edge-inset"), edge);
         setWindowAttribute(QStringLiteral("qrounded-resize-corner-inset"), corner);
     }
-}
-
-void NativeWindowAgent::setGtkFrameExtents(int left, int top, int right, int bottom) {
-    m_gtkFrameExtents = QMargins(qBound(0, left, 128),
-                                 qBound(0, top, 128),
-                                 qBound(0, right, 128),
-                                 qBound(0, bottom, 128));
-#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
-    if (m_window)
-        setGtkFrameExtentsForWindow(m_window, m_gtkFrameExtents, effectiveDevicePixelRatio());
+#else
+    setWindowAttribute(QStringLiteral("qrounded-resize-edge-inset"), edge);
+    setWindowAttribute(QStringLiteral("qrounded-resize-corner-inset"), corner);
 #endif
 }
 
@@ -531,32 +340,6 @@ void NativeWindowAgent::toggleMaximized(QQuickWindow *window) {
         target->showMaximized();
 }
 
-bool NativeWindowAgent::startSystemMove(QQuickWindow *window) {
-    QQuickWindow *target = window ? window : m_window.data();
-    if (!target)
-        return false;
-
-#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
-    if (m_clientSideShadowMode) {
-        if (prefersEwmhSystemMove() && sendNetWmMoveResize(target)) {
-            releaseQtMouseGrab(target);
-            m_linuxSystemMoveActive = true;
-            return true;
-        }
-        if (target->startSystemMove())
-            return true;
-        if (sendNetWmMoveResize(target)) {
-            releaseQtMouseGrab(target);
-            m_linuxSystemMoveActive = true;
-            return true;
-        }
-    }
-#else
-    Q_UNUSED(target)
-#endif
-    return false;
-}
-
 bool NativeWindowAgent::eventFilter(QObject *watched, QEvent *event) {
     if (watched == m_window.data() && event) {
         switch (event->type()) {
@@ -574,10 +357,17 @@ bool NativeWindowAgent::eventFilter(QObject *watched, QEvent *event) {
             applyWindowAttributes();
             break;
         case QEvent::WindowStateChange:
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
+            // WM has processed the state change (maximized -> windowed).
+            // Release the extents lock so QML can resume normal sync.
+            m_linuxSystemMoveExtentsLocked = false;
+#endif
             applyWindowAttributes();
             break;
         case QEvent::DevicePixelRatioChange:
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
             traceNativeMetrics("event-dpr-change");
+#endif
             applyWindowAttributes();
             break;
         case QEvent::Resize:
@@ -587,10 +377,13 @@ bool NativeWindowAgent::eventFilter(QObject *watched, QEvent *event) {
             } else
 #endif
             {
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
                 if (m_clientSideShadowMode) {
                     clearWindowRegion();
                     applyClientSideShadowInputRegion();
-                } else {
+                } else
+#endif
+                {
                     applyWindowRegion(false);
                 }
             }
@@ -831,13 +624,32 @@ bool NativeWindowAgent::nativeEventFilter(const QByteArray &eventType, void *mes
     }
     if (!m_linuxSystemMoveActive)
         return false;
+    const bool isSynthetic = event->response_type & 0x80;
     switch (responseType) {
     case XCB_BUTTON_RELEASE:
-    case XCB_FOCUS_OUT:
-    case XCB_LEAVE_NOTIFY:
+        // Reject non-synthetic ButtonRelease: the one from XUngrabPointer
+        // is generated by the X server (no 0x80 bit), while WM-sent events
+        // arrive via XSendEvent and carry the 0x80 send_event flag.
+        if (!isSynthetic)
+            break;
+        m_linuxSystemMoveActive = false;
+        m_linuxSystemMoveFromMaximized = false;
+        m_linuxSystemMoveExtentsLocked = false;
+        emit nativeSystemMoveActiveChanged();
+        emit nativeSystemMoveFinished();
+        break;
     case XCB_UNMAP_NOTIFY:
         m_linuxSystemMoveActive = false;
+        m_linuxSystemMoveFromMaximized = false;
+        m_linuxSystemMoveExtentsLocked = false;
+        emit nativeSystemMoveActiveChanged();
         emit nativeSystemMoveFinished();
+        break;
+    case XCB_FOCUS_OUT:
+    case XCB_LEAVE_NOTIFY:
+        // These are transitional during WM-driven maximized restore on Xfwm4.
+        // Treating them as move-finished lets QML resync while the pointer is
+        // still owned by the WM, which randomly offsets the restored CSD frame.
         break;
     default:
         break;
@@ -915,6 +727,26 @@ void NativeWindowAgent::applyWindowAttributes() {
     // hit-testing and window behavior; this project owns the custom rounded shell.
     applyWindowRegion(false);
 #else
+#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
+    if (m_clientSideShadowMode) {
+        // Compute extents from the actual window state instead of stale
+        // m_gtkFrameExtents, which may still hold the windowed value during
+        // compositor-initiated transitions (edge-snap maximize, etc.).
+        const bool maximized = m_window->visibility() == QWindow::Maximized
+                               || m_window->visibility() == QWindow::FullScreen;
+        const int inset = maximized ? 0 : m_linuxCsdFullInset;
+        setGtkFrameExtentsForWindow(m_window, QMargins(inset, inset, inset, inset), effectiveDevicePixelRatio());
+        setX11NormalWindowTypeForDesktop(m_window);
+        clearWindowRegion();
+        applyClientSideShadowInputRegion();
+    } else if (m_customShadow) {
+        setGtkFrameExtentsForWindow(m_window, m_gtkFrameExtents, effectiveDevicePixelRatio());
+        applyWindowRegion(false);
+    } else {
+        setGtkFrameExtentsForWindow(m_window, m_gtkFrameExtents, effectiveDevicePixelRatio());
+        clearWindowRegion();
+    }
+#elif defined(Q_OS_LINUX)
     setGtkFrameExtentsForWindow(m_window, m_gtkFrameExtents, effectiveDevicePixelRatio());
     if (m_clientSideShadowMode) {
         setX11NormalWindowTypeForDesktop(m_window);
@@ -925,6 +757,13 @@ void NativeWindowAgent::applyWindowAttributes() {
     } else {
         clearWindowRegion();
     }
+#else
+    if (m_customShadow) {
+        applyWindowRegion(false);
+    } else {
+        clearWindowRegion();
+    }
+#endif
 #endif
 }
 
@@ -957,55 +796,6 @@ void NativeWindowAgent::applyWindowRegion(bool redraw) {
         return;
     const QSize size = nativeSizePx(m_window->size(), effectiveDevicePixelRatio());
     applyWindowRegionForNativeSize(size.width(), size.height(), redraw);
-#endif
-}
-
-void NativeWindowAgent::applyClientSideShadowInputRegion() {
-#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
-    if (!m_window)
-        return;
-    Display *display = sharedXDisplay();
-    if (!canUseX11Shape() || !display)
-        return;
-    const Window windowId = static_cast<Window>(m_window->winId());
-    if (!windowId)
-        return;
-
-    QSize size = x11WindowSizePx(display, windowId);
-    if (!size.isValid())
-        size = nativeSizePx(m_window->size(), effectiveDevicePixelRatio());
-
-    const qreal dpr = effectiveDevicePixelRatio();
-    const int left = qBound(0, nativePx(m_gtkFrameExtents.left(), dpr), size.width());
-    const int top = qBound(0, nativePx(m_gtkFrameExtents.top(), dpr), size.height());
-    const int right = qBound(0, nativePx(m_gtkFrameExtents.right(), dpr), qMax(0, size.width() - left));
-    const int bottom = qBound(0, nativePx(m_gtkFrameExtents.bottom(), dpr), qMax(0, size.height() - top));
-    const int contentWidth = qMax(0, size.width() - left - right);
-    const int contentHeight = qMax(0, size.height() - top - bottom);
-    const int edgeGrip = m_clientSideShadowMode ? nativePx(m_resizeEdgeInset, dpr) : 0;
-    const int inputLeft = qMax(0, left - edgeGrip);
-    const int inputTop = qMax(0, top - edgeGrip);
-    const int inputRight = qMin(size.width(), left + contentWidth + edgeGrip);
-    const int inputBottom = qMin(size.height(), top + contentHeight + edgeGrip);
-    const int inputWidth = qMax(0, inputRight - inputLeft);
-    const int inputHeight = qMax(0, inputBottom - inputTop);
-    if (dprTraceEnabled()) {
-        qInfo() << "QRoundedFrame DPR shape-input"
-                << "dpr" << dpr
-                << "windowSize" << m_window->size()
-                << "x11Size" << size
-                << "rect" << QRect(inputLeft, inputTop, inputWidth, inputHeight)
-                << "extents" << m_gtkFrameExtents;
-    }
-    if (inputWidth <= 0 || inputHeight <= 0) {
-        XShapeCombineMask(display, windowId, ShapeInput, 0, 0, None, ShapeSet);
-        XFlush(display);
-        return;
-    }
-
-    XRectangle rect = makeRect(short(inputLeft), short(inputTop), unsigned(inputWidth), unsigned(inputHeight));
-    XShapeCombineRectangles(display, windowId, ShapeInput, 0, 0, &rect, 1, ShapeSet, YXBanded);
-    XFlush(display);
 #endif
 }
 
@@ -1180,140 +970,6 @@ void NativeWindowAgent::restoreClassBackgroundBrush() {
         DeleteObject(brush);
     m_backgroundBrush = 0;
     m_previousClassBackgroundBrush = 0;
-#endif
-}
-
-void NativeWindowAgent::refreshScreenConnections() {
-    QScreen *screen = m_window ? m_window->screen() : nullptr;
-    if (m_screen == screen)
-        return;
-    if (m_screen)
-        disconnect(m_screen.data(), nullptr, this, nullptr);
-    m_screen = screen;
-    if (!m_screen)
-        return;
-
-    const auto refresh = [this]() {
-        refreshNativeMetrics("screen-signal");
-    };
-    connect(m_screen.data(), &QScreen::geometryChanged, this, refresh);
-    connect(m_screen.data(), &QScreen::availableGeometryChanged, this, refresh);
-    connect(m_screen.data(), &QScreen::physicalSizeChanged, this, refresh);
-    connect(m_screen.data(), &QScreen::logicalDotsPerInchChanged, this, refresh);
-    connect(m_screen.data(), &QScreen::physicalDotsPerInchChanged, this, refresh);
-    connect(m_screen.data(), &QScreen::virtualGeometryChanged, this, refresh);
-}
-
-void NativeWindowAgent::refreshNativeMetrics(const char *reason) {
-    const qreal previousDpr = effectiveDevicePixelRatio();
-    Display *display = sharedXDisplay();
-    if (auto *x11Application = qGuiApp ? qGuiApp->nativeInterface<QNativeInterface::QX11Application>() : nullptr)
-        display = x11Application->display();
-    m_x11ResourceDpr = readKdeScaleFactorDpr();
-    if (m_x11ResourceDpr <= 0.0)
-        m_x11ResourceDpr = readXftDpiDpr(display);
-    m_lastNativeDpr = effectiveDevicePixelRatio();
-    if (!qFuzzyCompare(previousDpr, m_lastNativeDpr))
-        emit effectiveDevicePixelRatioChanged();
-    traceNativeMetrics(reason);
-    applyWindowAttributes();
-}
-
-void NativeWindowAgent::traceNativeMetrics(const char *reason) const {
-#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
-    if (!dprTraceEnabled())
-        return;
-    Display *display = sharedXDisplay();
-    const Window windowId = m_window ? static_cast<Window>(m_window->winId()) : 0;
-    const QSize x11Size = x11WindowSizePx(display, windowId);
-    QScreen *screen = m_window ? m_window->screen() : nullptr;
-    qInfo() << "QRoundedFrame DPR"
-            << reason
-            << "windowDpr" << (m_window ? m_window->devicePixelRatio() : 0.0)
-            << "screenDpr" << (screen ? screen->devicePixelRatio() : 0.0)
-            << "resourceDpr" << m_x11ResourceDpr
-            << "effectiveDpr" << effectiveDevicePixelRatio()
-            << "logicalDpi" << (screen ? screen->logicalDotsPerInch() : 0.0)
-            << "qtSize" << (m_window ? m_window->size() : QSize())
-            << "x11Size" << x11Size
-            << "extents" << m_gtkFrameExtents;
-#else
-    Q_UNUSED(reason)
-#endif
-}
-
-void NativeWindowAgent::installX11RootPropertyListener() {
-#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
-    if (m_x11RootPropertyListenerInstalled)
-        return;
-    auto *x11Application = qGuiApp ? qGuiApp->nativeInterface<QNativeInterface::QX11Application>() : nullptr;
-    Display *display = x11Application ? x11Application->display() : nullptr;
-    if (!display || QGuiApplication::platformName().compare(QStringLiteral("xcb"), Qt::CaseInsensitive) != 0)
-        return;
-    XSelectInput(display, DefaultRootWindow(display), PropertyChangeMask);
-    XFlush(display);
-    m_x11RootPropertyListenerInstalled = true;
-    if (dprTraceEnabled())
-        qInfo() << "QRoundedFrame DPR root-listener installed";
-#endif
-}
-
-void NativeWindowAgent::installKdeScaleWatcher() {
-#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
-    if (QGuiApplication::platformName().compare(QStringLiteral("xcb"), Qt::CaseInsensitive) != 0)
-        return;
-    const QString desktop = linuxDesktopText();
-    if (!desktop.contains(QStringLiteral("kde")) && !desktop.contains(QStringLiteral("plasma")))
-        return;
-
-    auto *watcher = qobject_cast<QFileSystemWatcher *>(m_kdeScaleWatcher);
-    if (!watcher) {
-        watcher = new QFileSystemWatcher(this);
-        m_kdeScaleWatcher = watcher;
-        connect(watcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &) {
-            refreshKdeScaleWatcherPaths();
-            refreshNativeMetrics("kde-scale-file");
-        });
-        connect(watcher, &QFileSystemWatcher::directoryChanged, this, [this](const QString &) {
-            refreshKdeScaleWatcherPaths();
-            refreshNativeMetrics("kde-scale-dir");
-        });
-    }
-    refreshKdeScaleWatcherPaths();
-#endif
-}
-
-void NativeWindowAgent::refreshKdeScaleWatcherPaths() {
-#if defined(Q_OS_LINUX) && defined(FRAMELESS_NATIVE_HAS_X11_SHAPE)
-    auto *watcher = qobject_cast<QFileSystemWatcher *>(m_kdeScaleWatcher);
-    if (!watcher)
-        return;
-    m_kdeConfigDir = QDir::homePath() + QStringLiteral("/.config");
-    m_kdeGlobalsPath = m_kdeConfigDir + QStringLiteral("/kdeglobals");
-    m_kcmFontsPath = m_kdeConfigDir + QStringLiteral("/kcmfonts");
-
-    const auto ensureWatched = [watcher](const QString &path, bool directory) {
-        if (path.isEmpty())
-            return;
-        const QStringList existing = directory ? watcher->directories() : watcher->files();
-        if (existing.contains(path))
-            return;
-        if (directory) {
-            if (QDir(path).exists())
-                watcher->addPath(path);
-        } else {
-            if (QFileInfo::exists(path))
-                watcher->addPath(path);
-        }
-    };
-
-    ensureWatched(m_kdeConfigDir, true);
-    ensureWatched(m_kdeGlobalsPath, false);
-    ensureWatched(m_kcmFontsPath, false);
-    if (dprTraceEnabled())
-        qInfo() << "QRoundedFrame DPR kde-watcher"
-                << "dirs" << watcher->directories()
-                << "files" << watcher->files();
 #endif
 }
 

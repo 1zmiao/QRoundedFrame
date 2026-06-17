@@ -178,7 +178,7 @@ def write_linux_launcher(release_dir: Path, app_name: str) -> None:
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         'ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
-        'export QROUNDEDFRAME_ROOT="${QROUNDEDFRAME_ROOT:-$ROOT}"\n'
+        'export QROUNDEDFRAME_ROOT="$ROOT"\n'
         'exec "$ROOT/bin/' + app_name + '" "$@"\n',
         encoding="utf-8",
         newline="\n",

@@ -250,23 +250,30 @@ void logScreenSnapshot(const QString &label)
 
 QString findRuntimeRoot(const QString &appDirPath)
 {
-    const QDir appDir(appDirPath);
     const QString envRoot = QString::fromLocal8Bit(qgetenv("QROUNDEDFRAME_ROOT")).trimmed();
-    QStringList candidates;
-    if (!envRoot.isEmpty())
-        candidates.append(envRoot);
-    candidates.append(appDir.absolutePath());
-    candidates.append(appDir.absoluteFilePath(QStringLiteral("..")));
-    candidates.append(appDir.absoluteFilePath(QStringLiteral("../../..")));
-
-    for (const QString &candidate : candidates) {
-        const QDir dir(QDir::cleanPath(candidate));
+    const auto isRuntimeRoot = [](const QDir &dir) {
         if (QFile::exists(dir.absoluteFilePath(QStringLiteral("qml/NativeAppMain.qml")))
             && QFile::exists(dir.absoluteFilePath(QStringLiteral("app/prebuilt")))) {
-            return dir.absolutePath();
+            return true;
         }
+        return false;
+    };
+
+    if (!envRoot.isEmpty()) {
+        const QDir envDir(QDir::cleanPath(envRoot));
+        if (isRuntimeRoot(envDir))
+            return envDir.absolutePath();
     }
-    return QDir::cleanPath(appDir.absoluteFilePath(QStringLiteral("../../..")));
+
+    QDir dir(QDir::cleanPath(appDirPath));
+    for (int i = 0; i < 10; ++i) {
+        if (isRuntimeRoot(dir))
+            return dir.absolutePath();
+        if (!dir.cdUp())
+            break;
+    }
+
+    return QDir::cleanPath(appDirPath);
 }
 } // namespace
 

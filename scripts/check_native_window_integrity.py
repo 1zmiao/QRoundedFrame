@@ -439,6 +439,26 @@ def check_qml_shadow_path() -> None:
     ]:
         if needle not in cpp_ui_text:
             fail(f"C++ UI runtime is missing migrated bridge/runtime behavior: {needle}")
+    launcher_path = ROOT / "app" / "cpp_ui_launcher.py"
+    launcher_text = read_text(launcher_path)
+    if 'env.setdefault("QROUNDEDFRAME_ROOT"' in launcher_text:
+        fail(f"{rel(launcher_path)} must overwrite QROUNDEDFRAME_ROOT; copied projects must not inherit another project root.")
+    if 'env["QROUNDEDFRAME_ROOT"] = str(ROOT)' not in launcher_text:
+        fail(f"{rel(launcher_path)} must set QROUNDEDFRAME_ROOT from its own repository root.")
+    if 'absoluteFilePath(QStringLiteral("../../.."))' in read_text(cpp_ui_main):
+        fail(f"{rel(cpp_ui_main)} must not rely on fixed ../../../ runtime-root fallback; build/package layouts differ.")
+    if "for (int i = 0; i < 10; ++i)" not in read_text(cpp_ui_main):
+        fail(f"{rel(cpp_ui_main)} must search upward for the runtime root so backups can run independently.")
+    for rel_script in [
+        "app/cpp/ui_runtime/run_linux.sh",
+        "scripts/package_app.py",
+    ]:
+        script_text = read_text(ROOT / rel_script)
+        if "${QROUNDEDFRAME_ROOT:-" in script_text:
+            fail(f"{rel_script} must not preserve an inherited QROUNDEDFRAME_ROOT.")
+    launcher_cpp_text = read_text(ROOT / "app" / "cpp" / "launcher" / "launcher.cpp")
+    if 'SetEnvironmentVariableW(L"QROUNDEDFRAME_ROOT", runtimeDir.c_str())' not in launcher_cpp_text:
+        fail("Windows launcher must set QROUNDEDFRAME_ROOT to its bundled runtime directory.")
     for forbidden in [
         "QQuickWidget",
         "createWindowContainer",

@@ -8,5 +8,5 @@ if [[ ! -x "$EXE" ]]; then
   bash "$ROOT/app/cpp/ui_runtime/build_linux.sh"
 fi
 
-export QROUNDEDFRAME_ROOT="${QROUNDEDFRAME_ROOT:-$ROOT}"
+export QROUNDEDFRAME_ROOT="$ROOT"
 exec "$EXE" "$@"

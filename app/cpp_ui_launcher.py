@@ -150,8 +150,7 @@ def launch_cpp_ui(argv: list[str] | None = None) -> int:
             path_parts.append(str(native_plugin_dir))
         path_parts.append(env.get("PATH", ""))
         env["PATH"] = os.pathsep.join(path_parts)
-    else:
-        env.setdefault("QROUNDEDFRAME_ROOT", str(ROOT))
+    env["QROUNDEDFRAME_ROOT"] = str(ROOT)
 
     args = [str(_exe_path())]
     if argv:

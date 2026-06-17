@@ -55,6 +55,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
     const std::wstring nextPath = runtimeDir + L";" + pathValue;
     SetEnvironmentVariableW(L"PATH", nextPath.c_str());
+    SetEnvironmentVariableW(L"QROUNDEDFRAME_ROOT", runtimeDir.c_str());
     SetEnvironmentVariableW(L"QROUNDEDFRAME_USER_DATA_ROOT", base.c_str());
 
     STARTUPINFOW si = {};

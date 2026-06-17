@@ -43,8 +43,6 @@ void configureProcessAllocator()
     // 旧 PySide 入口曾在 Python 里调用 mallopt 压低 Linux 常驻内存。
     // 转正后 UI 进程变成 C++，这类设置必须在 C++ 进程启动早期完成，
     // 否则保留 legacy memory_tools.py 也不会影响当前 UI 进程。
-    // ? PySide ???? Python ??? mallopt ?? Linux ?????
-    // ??? UI ???? C++???????? C++ ?????????
     mallopt(M_TRIM_THRESHOLD, 128 * 1024);
     mallopt(M_MMAP_THRESHOLD, 128 * 1024);
 #ifdef M_ARENA_MAX

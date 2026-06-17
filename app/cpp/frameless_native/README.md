@@ -40,7 +40,7 @@ bash app/cpp/frameless_native/build_linux.sh
 
 https://github.com/stdware/qwindowkit
 
-`third_party/qwindowkit` 当前整包放入仓库，方便 clone 后直接编译。项目中包含针对本工程 resize hit-test 的本地调整，后续升级 QWindowKit 时需要重新核对这些差异。
+`third_party/qwindowkit` 当前整包放入仓库，方便 clone 后直接编译。项目不是直接裸用上游窗口，而是在本目录的 native 插件层补了 system/custom 路线、外置阴影、Linux CSD、resize hit-test 和 QML 状态同步。后续升级 QWindowKit 时，必须重新验证这些集成点，不能只替换第三方目录后直接发布。
 
 ## 责任边界
 

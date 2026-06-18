@@ -560,9 +560,17 @@ Item {
         anchors.margins: 0
         anchors.topMargin: Core.Theme.metrics.titleBarHeight
         active: root.contentActive
-        asynchronous: true
+        asynchronous: root.pageKey !== "task-create" && root.pageKey.indexOf("task-edit") !== 0
         source: root.pageSource
         visible: !root.minimized && active
+        onStatusChanged: {
+            if (status === Loader.Error) {
+                const message = "inline content load failed key=" + root.pageKey + " source=" + root.pageSource
+                console.warn(message)
+                if (typeof App !== "undefined" && App && App.logRuntime)
+                    App.logRuntime(message)
+            }
+        }
         onLoaded: root.applyTaskPropsToContent()
     }
 

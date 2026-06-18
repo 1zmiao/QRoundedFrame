@@ -105,6 +105,60 @@ def _build_script() -> Path:
     return ROOT / "app" / "cpp" / "ui_runtime" / "build_linux.sh"
 
 
+def _exe_is_running(exe: Path) -> bool:
+    if not _is_windows():
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        target = os.path.normcase(os.path.abspath(str(exe)))
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+
+        process_ids = (wintypes.DWORD * 4096)()
+        bytes_returned = wintypes.DWORD()
+        if not psapi.EnumProcesses(
+            ctypes.byref(process_ids),
+            ctypes.sizeof(process_ids),
+            ctypes.byref(bytes_returned),
+        ):
+            return False
+
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        process_query_limited_information = 0x1000
+        count = bytes_returned.value // ctypes.sizeof(wintypes.DWORD)
+        for pid in process_ids[:count]:
+            if not pid:
+                continue
+            handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+            if not handle:
+                continue
+            try:
+                size = wintypes.DWORD(32768)
+                buffer = ctypes.create_unicode_buffer(size.value)
+                if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                    path = os.path.normcase(os.path.abspath(buffer.value))
+                    if path == target:
+                        return True
+            finally:
+                kernel32.CloseHandle(handle)
+    except Exception:
+        return False
+    return False
+
+
 def _native_plugin_dir() -> Path:
     tag = "win-x64-qt6.11-custom" if _is_windows() else "linux-x64-qt6.11-custom"
     return ROOT / "app" / "prebuilt" / tag / "qml" / "FramelessNative"
@@ -120,21 +174,26 @@ def _build_if_needed() -> int:
     if exe.exists():
         exe_mtime = exe.stat().st_mtime
         source_roots = [
-            ROOT / "app" / "cpp" / "ui_runtime",
-            ROOT / "qml",
-            ROOT / "resources",
+            ROOT / "app" / "cpp" / "ui_runtime" / "src",
+            ROOT / "app" / "cpp" / "ui_runtime" / "CMakeLists.txt",
         ]
         stale = False
         for source_root in source_roots:
             if not source_root.exists():
                 continue
-            for path in source_root.rglob("*"):
-                if path.is_file() and path.stat().st_mtime > exe_mtime:
-                    stale = True
+            if source_root.is_file():
+                stale = source_root.stat().st_mtime > exe_mtime
+            else:
+                for path in source_root.rglob("*"):
+                    if path.is_file() and path.stat().st_mtime > exe_mtime:
+                        stale = True
+                        break
+                if stale:
                     break
-            if stale:
-                break
         if not stale:
+            return 0
+        if _exe_is_running(exe):
+            print(f"C++ UI runtime is already running; skip rebuild: {exe}", file=sys.stderr)
             return 0
         print("C++ UI sources changed; rebuilding runtime...", file=sys.stderr)
     build_script = _build_script()

@@ -33,6 +33,8 @@ QtObject {
         if (pageKey === "update") return "../pages/UpdatePage.qml"
         if (pageKey === "about") return "../pages/AboutPage.qml"
         if (pageKey === "inline-demo") return "../pages/InlineDemoPage.qml"
+        if (pageKey === "task-create") return "../pages/TaskCreatePage.qml"
+        if (pageKey === "task-edit") return "../pages/TaskEditPage.qml"
         return "../pages/HomePage.qml"
     }
 

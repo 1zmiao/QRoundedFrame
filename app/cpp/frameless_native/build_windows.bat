@@ -36,6 +36,7 @@ if not exist "%NINJA_EXE%" (
     echo Ninja not found: "%NINJA_EXE%"
     goto :fail
 )
+if not defined FRAMELESS_NATIVE_BUILD_PARALLEL set "FRAMELESS_NATIVE_BUILD_PARALLEL=1"
 echo Using Qt: "%QT_PREFIX%"
 echo Using CMake: "%CMAKE_EXE%"
 echo Using Ninja: "%NINJA_EXE%"
@@ -61,7 +62,7 @@ if exist "%BUILD%" rmdir /s /q "%BUILD%"
 if exist "%PREBUILT%\qml\FramelessNative" rmdir /s /q "%PREBUILT%\qml\FramelessNative"
 "%CMAKE_EXE%" -S "%SRC%" -B "%BUILD%" -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%QT_PREFIX%" -DCMAKE_MAKE_PROGRAM="%NINJA_EXE%" -DFRAMELESS_NATIVE_QML_OUTPUT_DIR="%PREBUILT%\qml" -DQWINDOWKIT_ENABLE_WINDOWS_SYSTEM_BORDERS=%SYSTEM_BORDERS%
 if errorlevel 1 exit /b 1
-"%CMAKE_EXE%" --build "%BUILD%" --config Release
+"%CMAKE_EXE%" --build "%BUILD%" --config Release --parallel %FRAMELESS_NATIVE_BUILD_PARALLEL%
 if errorlevel 1 exit /b 1
 del /q "%PREBUILT%\qml\FramelessNative\FramelessNativeplugin.lib" "%PREBUILT%\qml\FramelessNative\FramelessNativeplugin.exp" "%PREBUILT%\qml\FramelessNative\FramelessNative_qml_module_dir_map.qrc" "%PREBUILT%\qml\FramelessNative\FramelessNative_qml_module_dir_map_rc.py" 2>nul
 exit /b 0

@@ -49,6 +49,7 @@ Item {
     property color displaySurfaceBorderColor: Core.Theme.color.outline
     property bool hostShellBackgroundAnimating: false
     property bool nativeSizeMoveActive: false
+    property bool _closingMainWindow: false
     property string pendingInlinePageKey: ""
     property var pendingInlineProps: ({})
     property bool trayMenuVisible: false
@@ -272,6 +273,16 @@ Item {
         externalShadow.destroyNativeShadowForHwnd(hwnd)
     }
 
+    function requestMainClose() {
+        if (typeof App !== "undefined" && App && App.tray && App.tray.handleClosing(NativeHost))
+            return
+        root._closingMainWindow = true
+        if (typeof App !== "undefined" && App && App.exitApplication)
+            App.exitApplication()
+        else if (typeof NativeHost !== "undefined" && NativeHost)
+            NativeHost.closeWindow()
+    }
+
     function fadeOutExternalShadow() {
         if (!externalShadow || !externalShadow.fadeOutNativeShadowForHwnd)
             return
@@ -282,6 +293,8 @@ Item {
     }
 
     function syncExternalShadow(forceRepaint) {
+        if (root._closingMainWindow)
+            return
         if (!externalShadow || !externalShadow.setNativeShadowForHwnd)
             return
         const hwnd = root.nativeHwndText()
@@ -477,7 +490,7 @@ Item {
                 onMoveFinished: NativeHost.endSystemMove()
                 onToggleMaximizeRequested: root.toggleMaximizedPrepared()
                 onMinimizeRequested: NativeHost.showMinimizedNative()
-                onCloseRequested: NativeHost.closeWindow()
+                onCloseRequested: root.requestMainClose()
                 onThemeToggleRequested: function(localPos, nextMode) { root.changeThemeWithRipple(nextMode, localPos.x, localPos.y) }
                 onAlwaysOnTopRequested: function(enabled) { NativeHost.setAlwaysOnTop(enabled) }
                 onToggleNavRequested: sideNav.toggle()
@@ -713,16 +726,24 @@ Item {
         root.showMainPage(sideNav.currentPage, false)
         Qt.callLater(root.syncNativeHitTestMetrics)
     }
-    Component.onDestruction: root.cleanupExternalShadow()
+    Component.onDestruction: {
+        // Main-window shutdown should let the process/window system tear down
+        // the helper together with the window. Destroying it here makes the
+        // external shadow disappear one frame earlier than the main window.
+        if (root.windowKey !== "main")
+            root.cleanupExternalShadow()
+    }
     onCornerRadiusChanged: {
+        if (root._closingMainWindow)
+            return
         root.syncNativeCornerRadius()
         root.syncExternalShadow(true)
     }
-    onNativeCustomShadowChanged: root.syncExternalShadow(true)
-    onNativeExternalShadowChanged: root.syncExternalShadow(true)
-    onNativeExternalShadowEnabledChanged: root.syncExternalShadow(true)
-    onExternalShadowMarginChanged: root.syncExternalShadow(true)
-    onExternalShadowOpacityChanged: root.syncExternalShadow(true)
+    onNativeCustomShadowChanged: if (!root._closingMainWindow) root.syncExternalShadow(true)
+    onNativeExternalShadowChanged: if (!root._closingMainWindow) root.syncExternalShadow(true)
+    onNativeExternalShadowEnabledChanged: if (!root._closingMainWindow) root.syncExternalShadow(true)
+    onExternalShadowMarginChanged: if (!root._closingMainWindow) root.syncExternalShadow(true)
+    onExternalShadowOpacityChanged: if (!root._closingMainWindow) root.syncExternalShadow(true)
     onDisplaySurfaceColorChanged: {
         if (!root.hostShellBackgroundAnimating)
             root.syncHostShellBackground(root.displaySurfaceColor)

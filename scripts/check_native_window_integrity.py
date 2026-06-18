@@ -252,7 +252,7 @@ def check_native_widget_host_agent() -> None:
         "externalShadow.setNativeShadowForHwnd",
         "externalShadow.syncNativeShadowForHwnd",
         "externalShadow.destroyNativeShadowForHwnd",
-        "Component.onDestruction: root.cleanupExternalShadow()",
+        "function cleanupExternalShadow()",
     ]:
         if needle not in qml_text:
             fail(f"{rel(qml_path)} is missing NativeWidgetHostAgent integration: {needle}")
@@ -344,7 +344,9 @@ def check_qml_shadow_path() -> None:
         "Core.Theme.color.surface",
         "root.scheduleNativeShadowShow()",
         "id: stableNativeShadowSyncTimer",
-        "Component.onDestruction: root.cleanupExternalShadow()",
+        "Component.onDestruction:",
+        "if (root.windowKey !== \"main\")",
+        "root.cleanupExternalShadow()",
         "root.bridge.window.isSnappedState(root)",
     ]
     for needle in required:
@@ -376,6 +378,18 @@ def check_qml_shadow_path() -> None:
         block = shadow_text[start:end if end > start else len(shadow_text)] if start >= 0 else ""
         if "registerShadowWindow" in block:
             fail(f"{rel(shadow_path)} must not register the shadow before its QML geometry is applied.")
+
+    native_main_path = ROOT / "qml" / "NativeMainContent.qml"
+    native_main_text = read_text(native_main_path)
+    for needle in [
+        "Component.onDestruction:",
+        "if (root.windowKey !== \"main\")",
+        "root.cleanupExternalShadow()",
+        "property bool _closingMainWindow: false",
+        "function requestMainClose()",
+    ]:
+        if needle not in native_main_text:
+            fail(f"{rel(native_main_path)} is missing required main-window shutdown guard: {needle}")
 
     child_path = ROOT / "qml" / "window" / "NativeChildWindow.qml"
     child_text = read_text(child_path)

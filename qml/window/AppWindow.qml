@@ -288,7 +288,7 @@ Window {
         root.close()
     }
     function syncExternalShadow() {
-        if (root._destroyingChildWindow)
+        if (root._destroyingChildWindow || root._closingMainWindow)
             return
         if (!externalShadow || !externalShadow.setNativeShadow)
             return
@@ -304,7 +304,7 @@ Window {
     }
 
     function scheduleNativeShadowShow() {
-        if (root._destroyingChildWindow)
+        if (root._destroyingChildWindow || root._closingMainWindow)
             return
         root.syncExternalShadow()
         stableNativeShadowSyncTimer.restart()
@@ -315,7 +315,7 @@ Window {
         })
     }
     function markNativeShadowDisplayReady() {
-        if (root._destroyingChildWindow)
+        if (root._destroyingChildWindow || root._closingMainWindow)
             return
         if (!root.visible || root.nativeShadowDisplayReady)
             return
@@ -436,6 +436,7 @@ Window {
         }
         if (typeof App !== "undefined" && App && App.logRuntime)
             App.logRuntime("AppWindow.requestMainClose falling back to exit")
+        root._closingMainWindow = true
         if (typeof App !== "undefined" && App && App.exitApplication)
             App.exitApplication()
         else
@@ -732,7 +733,13 @@ Window {
         }
     }
 
-    Component.onDestruction: root.cleanupExternalShadow()
+    Component.onDestruction: {
+        // Main-window shutdown lets the process/window system tear down the helper
+        // together with the window. Destroying the helper here makes the shadow
+        // disappear one frame earlier than the main window on external-shadow paths.
+        if (root.windowKey !== "main")
+            root.cleanupExternalShadow()
+    }
 
     onXChanged: { snapStateSyncTimer.restart(); stableNativeShadowSyncTimer.restart() }
     onYChanged: { snapStateSyncTimer.restart(); stableNativeShadowSyncTimer.restart() }
@@ -757,7 +764,7 @@ Window {
         root.scheduleNativeShadowShow()
     }
     onVisibleChanged: {
-        if (root._destroyingChildWindow)
+        if (root._destroyingChildWindow || root._closingMainWindow)
             return
         if (!root.visible)
             root.nativeShadowDisplayReady = false

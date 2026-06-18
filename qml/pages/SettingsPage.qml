@@ -93,32 +93,78 @@ Item {
                         else if (root.appReady && App.settings) App.settings.setValue("ui/showColorButton", checked)
                     }
                 }
-                AppCheckBox {
-                    text: "标题栏显示 CPU"
-                    storageKey: "ui/showTitleBarCpu"
-                    checked: false
-                    autoLoad: true
-                }
-                AppCheckBox {
-                    text: "标题栏显示内存"
-                    storageKey: "ui/showTitleBarMemory"
-                    checked: false
-                    autoLoad: true
-                }
-                AppCheckBox {
-                    text: "标题栏显示 GPU"
-                    storageKey: "ui/showTitleBarGpu"
-                    checked: false
-                    autoLoad: true
+                Text { text: "标题栏状态栏"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.fontSize.body; font.family: Core.Theme.headingFontFamily }
+                Flow {
+                    width: parent.width
+                    spacing: Core.Theme.dp(8)
+                    AppCheckBox {
+                        text: "CPU"
+                        storageKey: "ui/showTitleBarCpu"
+                        checked: false
+                        autoLoad: true
+                    }
+                    AppCheckBox {
+                        text: "内存"
+                        storageKey: "ui/showTitleBarMemory"
+                        checked: true
+                        autoLoad: true
+                    }
+                    AppCheckBox {
+                        text: "GPU"
+                        storageKey: "ui/showTitleBarGpu"
+                        checked: false
+                        autoLoad: true
+                    }
                 }
 
-                Rectangle {
+                Flow {
                     width: parent.width
-                    height: 1
-                    color: Core.Theme.color.hairline
-                    opacity: 0.75
-                    Behavior on color { ColorAnimation { duration: Core.Theme.animatedColorTransitionMs; easing.type: Easing.InOutCubic } }
+                    spacing: Core.Theme.dp(8)
+                    AppButton {
+                        variant: "primary"
+                        text: "保存设置"
+                        onClicked: { root.showToast("设置已保存") }
+                    }
+                    AppButton {
+                        variant: "soft"
+                        text: "切换日夜主题"
+                        onClicked: {
+                            if (!root.appReady || !App.theme) return
+                            const next = Core.Theme.mode === "dark" ? "light" : "dark"
+                            const host = root.Window.window
+                            if (host && host.changeThemeWithRipple)
+                                host.changeThemeWithRipple(next, host.width / 2, host.height / 2)
+                            else if (typeof NativeHost !== "undefined" && NativeHost && NativeHost.changeThemeWithRipple)
+                                NativeHost.changeThemeWithRipple(next, root.width / 2, root.height / 2)
+                            else
+                                App.theme.setMode(next)
+                        }
+                    }
                 }
+            }
+        }
+
+        Rectangle {
+            width: parent.width
+            height: fontColumn.implicitHeight + Core.Theme.metrics.cardHeightPadding
+            radius: Core.Theme.radius.card
+            color: Core.Theme.color.card
+            border.color: Core.Theme.color.cardOutline
+            Behavior on border.color { ColorAnimation { duration: Core.Theme.animatedColorTransitionMs; easing.type: Easing.InOutCubic } }
+            Behavior on color { ColorAnimation { duration: Core.Theme.animatedColorTransitionMs; easing.type: Easing.InOutCubic } }
+            antialiasing: true
+
+            BackgroundRipple { radius: parent.radius }
+            CardAccentGlow { radius: parent.radius }
+
+            Column {
+                id: fontColumn
+                z: 1
+                anchors.fill: parent
+                anchors.margins: Core.Theme.metrics.cardPadding
+                spacing: Core.Theme.dp(12)
+
+                Text { text: "界面字体"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.fontSize.subtitle; font.family: Core.Theme.headingFontFamily; font.weight: Core.Theme.headingFontWeight; font.letterSpacing: Core.Theme.headingLetterSpacing }
 
                 Column {
                     width: parent.width
@@ -126,7 +172,7 @@ Item {
                     Flow {
                         width: parent.width
                         spacing: Core.Theme.dp(8)
-                        Text { text: "界面字体大小（Ctrl+滚轮）"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.fontSize.body; width: Core.Theme.dp(168); height: Core.Theme.metrics.controlHeight; verticalAlignment: Text.AlignVCenter }
+                        Text { text: "字体大小（Ctrl+滚轮）"; color: Core.Theme.color.text; font.pixelSize: Core.Theme.fontSize.body; width: Core.Theme.dp(168); height: Core.Theme.metrics.controlHeight; verticalAlignment: Text.AlignVCenter }
                         Text { text: Math.round(13 * Core.Theme.fontScale) + " px / " + Math.round(Core.Theme.fontScale * 100) + "%"; color: Core.Theme.color.mutedText; font.pixelSize: Core.Theme.fontSize.control; width: Core.Theme.dp(94); height: Core.Theme.metrics.controlHeight; verticalAlignment: Text.AlignVCenter }
                         AppButton { text: "重置"; variant: "soft"; minWidth: Core.Theme.dp(56); horizontalPadding: Core.Theme.dp(12); onClicked: if (root.appReady && App.theme) App.theme.resetFontScale() }
                     }
@@ -146,59 +192,6 @@ Item {
                         width: parent.width
                         spacing: 0
                         Repeater { model: ["85", "90", "95", "100", "105", "110", "115", "120", "125", "130"]; delegate: Text { width: parent.width / 10; text: modelData; color: Core.Theme.color.mutedText; font.pixelSize: Core.Theme.fontSize.caption; horizontalAlignment: Text.AlignHCenter } }
-                    }
-                }
-
-                Column {
-                    width: parent.width
-                    spacing: Core.Theme.dp(6)
-                    Text { width: parent.width; text: "托盘图标文件：" + root.trayIconPath(); color: Core.Theme.color.mutedText; font.pixelSize: Core.Theme.fontSize.caption; elide: Text.ElideRight }
-                    Text { width: parent.width; text: "默认图标位置：" + root.trayDefaultIconPath(); color: Core.Theme.color.mutedText; font.pixelSize: Core.Theme.fontSize.caption; elide: Text.ElideRight }
-                    Text { width: parent.width; text: "可以直接替换默认 PNG，也可以在下面输入 PNG/ICO 的绝对路径并保存。"; color: Core.Theme.color.mutedText; font.pixelSize: Core.Theme.fontSize.caption; wrapMode: Text.WordWrap; lineHeight: Core.Theme.bodyLineHeight }
-                }
-
-                Loader {
-                    id: trayIconPathInputLoader
-                    width: parent.width
-                    height: item ? item.height : Core.Theme.metrics.fieldHeight
-                    active: root.deferredControlsReady
-                    sourceComponent: AppTextField {
-                        width: trayIconPathInputLoader.width
-                        placeholderText: "自定义托盘图标路径，可留空"
-                        storageKey: "tray/iconPath"
-                        autoLoad: true
-                        onSaved: if (root.appReady && App.tray) App.tray.setIconPath(text)
-                    }
-                }
-                Flow {
-                    width: parent.width
-                    spacing: Core.Theme.dp(8)
-                    AppButton {
-                        variant: "primary"
-                        text: "保存设置"
-                        onClicked: {
-                            if (!root.appReady || !App.settings) return
-                            const trayIconPathInput = trayIconPathInputLoader.item
-                            App.settings.setValue("tray/iconPath", trayIconPathInput ? trayIconPathInput.text : root.settingValue("tray/iconPath", ""))
-                            if (App.tray)
-                                App.tray.setIconPath(trayIconPathInput ? trayIconPathInput.text : root.settingValue("tray/iconPath", ""))
-                            root.showToast("设置已保存")
-                        }
-                    }
-                    AppButton {
-                        variant: "soft"
-                        text: "切换日夜主题"
-                        onClicked: {
-                            if (!root.appReady || !App.theme) return
-                            const next = Core.Theme.mode === "dark" ? "light" : "dark"
-                            const host = root.Window.window
-                            if (host && host.changeThemeWithRipple)
-                                host.changeThemeWithRipple(next, host.width / 2, host.height / 2)
-                            else if (typeof NativeHost !== "undefined" && NativeHost && NativeHost.changeThemeWithRipple)
-                                NativeHost.changeThemeWithRipple(next, root.width / 2, root.height / 2)
-                            else
-                                App.theme.setMode(next)
-                        }
                     }
                 }
             }

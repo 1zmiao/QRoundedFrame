@@ -53,7 +53,9 @@ Item {
         radius: root.radius
         color: root.bgColor()
         border.color: root.isFilled || root.isSoft
-                      ? Core.Theme.primaryOutline
+                      ? Core.Theme.mode === "dark"
+                        ? Core.Theme.alpha(Qt.lighter(Core.Theme.primary, 1.6), 0.65)
+                        : Core.Theme.primaryOutline
                       : (root.outlineGhost
                          ? (root.hovered || root.pressed
                             ? Core.Theme.color.outlineAccent

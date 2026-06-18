@@ -199,7 +199,7 @@ QVariantMap defaultSettings()
             {QStringLiteral("showColorButton"), true},
             {QStringLiteral("showTitleBarResourceStats"), false},
             {QStringLiteral("showTitleBarCpu"), false},
-            {QStringLiteral("showTitleBarMemory"), false},
+            {QStringLiteral("showTitleBarMemory"), true},
             {QStringLiteral("showTitleBarGpu"), false},
             {QStringLiteral("fontScale"), 1.0},
         }},

@@ -42,6 +42,15 @@ target_link_libraries(QRoundedFrame PRIVATE
     Qt6::Widgets
 )
 
+if(UNIX AND NOT APPLE)
+    find_package(OpenSSL)
+    if(OpenSSL_FOUND)
+        target_compile_definitions(QRoundedFrame PRIVATE QROUNDEDFRAME_HAS_OPENSSL=1)
+        target_include_directories(QRoundedFrame PRIVATE ${OPENSSL_INCLUDE_DIR})
+        target_link_libraries(QRoundedFrame PRIVATE OpenSSL::Crypto)
+    endif()
+endif()
+
 if(UNIX AND NOT APPLE AND X11_FOUND)
     target_compile_definitions(QRoundedFrame PRIVATE QROUNDEDFRAME_HAS_X11=1)
     target_include_directories(QRoundedFrame PRIVATE ${X11_INCLUDE_DIR})

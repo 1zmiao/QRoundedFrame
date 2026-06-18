@@ -402,6 +402,16 @@ Item {
                     }
                 }
             }
+
+            MouseArea {
+                anchors.fill: parent
+                enabled: visible && !root.useNativeCaption
+                acceptedButtons: Qt.LeftButton
+                onPressed: function(mouse) { root.dragPress(resourceStatsBlock, mouse.x, mouse.y) }
+                onPositionChanged: function(mouse) { if (pressed) root.dragMove(resourceStatsBlock, mouse.x, mouse.y) }
+                onReleased: root.dragRelease()
+                onCanceled: root.dragRelease()
+            }
         }
 
         Loader {

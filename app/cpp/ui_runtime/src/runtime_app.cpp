@@ -1,3 +1,7 @@
+#if defined(__linux__) && defined(QROUNDEDFRAME_HAS_LIBSECRET)
+#include <libsecret/secret.h>
+#endif
+
 #include "runtime_app.h"
 
 #include "card_glow_provider.h"
@@ -54,10 +58,12 @@
 #include <winternl.h>
 #elif defined(Q_OS_UNIX)
 #include <unistd.h>
+#include <malloc.h>
 #endif
 
-#if defined(Q_OS_LINUX) && defined(QROUNDEDFRAME_HAS_LIBSECRET)
-#include <libsecret/secret.h>
+#if !defined(Q_OS_WIN) && defined(QROUNDEDFRAME_HAS_OPENSSL)
+#include <openssl/evp.h>
+#include <openssl/sha.h>
 #endif
 
 namespace {
@@ -338,6 +344,125 @@ bool writeSecretServiceVault(const QByteArray &payload)
         return false;
     }
     return ok == TRUE;
+}
+#endif
+
+#if !defined(Q_OS_WIN) && defined(QROUNDEDFRAME_HAS_OPENSSL)
+
+static QByteArray deriveEncryptionKey()
+{
+    auto readFile = [](const char *path) -> QByteArray {
+        QFile f(QString::fromUtf8(path));
+        if (f.open(QIODevice::ReadOnly))
+            return f.readAll().trimmed();
+        return {};
+    };
+
+    QByteArray machineId = readFile("/etc/machine-id");
+    if (machineId.isEmpty())
+        machineId = readFile("/var/lib/dbus/machine-id");
+
+    if (machineId.isEmpty()) {
+        qWarning() << "RuntimeSecrets: cannot determine machine-id for key derivation";
+        return {};
+    }
+
+    const QByteArray salt("QRoundedFrame.v1.secrets.");
+    QByteArray input = salt + machineId;
+
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char *>(input.constData()), input.size(), hash);
+
+    return QByteArray(reinterpret_cast<const char *>(hash), SHA256_DIGEST_LENGTH);
+}
+
+static QByteArray encryptLocalPayload(const QByteArray &plaintext)
+{
+    const QByteArray key = deriveEncryptionKey();
+    if (key.size() != 32)
+        return {};
+
+    unsigned char nonce[12];
+    FILE *urandom = fopen("/dev/urandom", "rb");
+    if (!urandom) return {};
+    const size_t nread = fread(nonce, 1, 12, urandom);
+    fclose(urandom);
+    if (nread != 12) return {};
+
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return {};
+
+    unsigned char ciphertext[plaintext.size() + 16];
+    unsigned char tag[16] = {};
+    int len = 0;
+    int ciphertextLen = 0;
+
+    EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr);
+    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr);
+    EVP_EncryptInit_ex(ctx, nullptr, nullptr,
+                       reinterpret_cast<const unsigned char *>(key.constData()), nonce);
+    EVP_EncryptUpdate(ctx, ciphertext, &len,
+                      reinterpret_cast<const unsigned char *>(plaintext.constData()), plaintext.size());
+    ciphertextLen = len;
+    EVP_EncryptFinal_ex(ctx, ciphertext + ciphertextLen, &len);
+    ciphertextLen += len;
+    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag);
+    EVP_CIPHER_CTX_free(ctx);
+
+    QByteArray combined;
+    combined.append(reinterpret_cast<const char *>(nonce), 12);
+    combined.append(reinterpret_cast<const char *>(ciphertext), ciphertextLen);
+    combined.append(reinterpret_cast<const char *>(tag), 16);
+
+    return QByteArray("QRFE\n") + combined.toBase64();
+}
+
+static QByteArray decryptLocalPayload(const QByteArray &encrypted)
+{
+    if (!encrypted.startsWith("QRFE\n"))
+        return {};
+
+    const QByteArray key = deriveEncryptionKey();
+    if (key.size() != 32)
+        return {};
+
+    const QByteArray combined = QByteArray::fromBase64(encrypted.mid(5));
+    if (combined.size() < 12 + 16)
+        return {};
+
+    const unsigned char *nonce = reinterpret_cast<const unsigned char *>(combined.constData());
+    const int ciphertextLen = combined.size() - 12 - 16;
+    const unsigned char *ciphertext = nonce + 12;
+    const unsigned char *tag = ciphertext + ciphertextLen;
+
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return {};
+
+    unsigned char plaintext[ciphertextLen + 16];
+    int len = 0;
+    int plaintextLen = 0;
+
+    EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr);
+    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr);
+    EVP_DecryptInit_ex(ctx, nullptr, nullptr,
+                       reinterpret_cast<const unsigned char *>(key.constData()), nonce);
+    EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, ciphertextLen);
+    plaintextLen = len;
+
+    if (!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, const_cast<unsigned char *>(tag))) {
+        EVP_CIPHER_CTX_free(ctx);
+        return {};
+    }
+
+    if (EVP_DecryptFinal_ex(ctx, plaintext + plaintextLen, &len) <= 0) {
+        EVP_CIPHER_CTX_free(ctx);
+        qWarning() << "RuntimeSecrets: local decryption failed (tampered or wrong key)";
+        return {};
+    }
+    plaintextLen += len;
+    EVP_CIPHER_CTX_free(ctx);
+
+    return QByteArray(reinterpret_cast<const char *>(plaintext), plaintextLen);
 }
 #endif
 
@@ -2639,35 +2764,44 @@ void RuntimeSecrets::save() const
 {
     QDir().mkpath(m_secureDir);
     const QByteArray payload = QJsonDocument(QJsonObject::fromVariantMap(m_values)).toJson(QJsonDocument::Compact);
-#if defined(Q_OS_LINUX) && defined(QROUNDEDFRAME_HAS_LIBSECRET)
-    if (writeSecretServiceVault(payload))
-        return;
-    qWarning() << "RuntimeSecrets falling back to local file storage";
-#endif
+
     QSaveFile file(m_vaultFile);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        return;
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
 #ifdef Q_OS_WIN
-    DATA_BLOB input {};
-    input.pbData = reinterpret_cast<BYTE *>(const_cast<char *>(payload.constData()));
-    input.cbData = static_cast<DWORD>(payload.size());
-    DATA_BLOB output {};
-    DATA_BLOB entropy {};
-    const QByteArray entropyBytes("QRoundedFrame.RuntimeSecrets.v1");
-    entropy.pbData = reinterpret_cast<BYTE *>(const_cast<char *>(entropyBytes.constData()));
-    entropy.cbData = static_cast<DWORD>(entropyBytes.size());
-    if (!CryptProtectData(&input, L"QRoundedFrame secrets", &entropy, nullptr, nullptr, 0, &output)) {
-        qWarning() << "RuntimeSecrets save failed: CryptProtectData" << GetLastError();
-        return;
-    }
-    const QByteArray encrypted(reinterpret_cast<const char *>(output.pbData), int(output.cbData));
-    LocalFree(output.pbData);
-    file.write(QByteArrayLiteral("QRFS1\n"));
-    file.write(encrypted.toBase64());
+        DATA_BLOB input {};
+        input.pbData = reinterpret_cast<BYTE *>(const_cast<char *>(payload.constData()));
+        input.cbData = static_cast<DWORD>(payload.size());
+        DATA_BLOB output {};
+        DATA_BLOB entropy {};
+        const QByteArray entropyBytes("QRoundedFrame.RuntimeSecrets.v1");
+        entropy.pbData = reinterpret_cast<BYTE *>(const_cast<char *>(entropyBytes.constData()));
+        entropy.cbData = static_cast<DWORD>(entropyBytes.size());
+        if (!CryptProtectData(&input, L"QRoundedFrame secrets", &entropy, nullptr, nullptr, 0, &output)) {
+            qWarning() << "RuntimeSecrets save failed: CryptProtectData" << GetLastError();
+        } else {
+            const QByteArray encrypted(reinterpret_cast<const char *>(output.pbData), int(output.cbData));
+            LocalFree(output.pbData);
+            file.write(QByteArrayLiteral("QRFE\n"));
+            file.write(encrypted.toBase64());
+            file.commit();
+        }
+#elif defined(QROUNDEDFRAME_HAS_OPENSSL)
+        const QByteArray encrypted = encryptLocalPayload(payload);
+        if (!encrypted.isEmpty()) {
+            file.write(encrypted);
+            file.commit();
+        } else {
+            qWarning() << "RuntimeSecrets: local encryption failed";
+        }
 #else
-    file.write(payload);
+        file.write(payload);
+        file.commit();
 #endif
-    file.commit();
+    }
+
+#if defined(Q_OS_LINUX) && defined(QROUNDEDFRAME_HAS_LIBSECRET)
+    writeSecretServiceVault(payload);
+#endif
 }
 
 QVariantMap RuntimeSecrets::readVault() const
@@ -2683,24 +2817,19 @@ QVariantMap RuntimeSecrets::readVault() const
         return doc.object().toVariantMap();
     };
 
-#if defined(Q_OS_LINUX) && defined(QROUNDEDFRAME_HAS_LIBSECRET)
-    const QByteArray secretServicePayload = readSecretServiceVault();
-    if (!secretServicePayload.isEmpty()) {
-        const QVariantMap values = parseObject(secretServicePayload, QStringLiteral("Secret Service"));
-        if (!values.isEmpty())
-            return values;
-    }
-#endif
-
     QFile vault(m_vaultFile);
     if (vault.exists() && vault.open(QIODevice::ReadOnly)) {
-        QByteArray payload = vault.readAll();
-#ifdef Q_OS_WIN
-        if (payload.startsWith("QRFS1\n")) {
-            payload = QByteArray::fromBase64(payload.mid(6).trimmed());
+        const QByteArray fileData = vault.readAll();
+        vault.close();
+
+        if (fileData.startsWith("QRFE\n")) {
+#if defined(Q_OS_WIN)
+            const QByteArray decoded = QByteArray::fromBase64(fileData.mid(5).trimmed());
+            if (decoded.isEmpty())
+                return {};
             DATA_BLOB input {};
-            input.pbData = reinterpret_cast<BYTE *>(payload.data());
-            input.cbData = static_cast<DWORD>(payload.size());
+            input.pbData = const_cast<BYTE *>(reinterpret_cast<const BYTE *>(decoded.constData()));
+            input.cbData = static_cast<DWORD>(decoded.size());
             DATA_BLOB output {};
             DATA_BLOB entropy {};
             const QByteArray entropyBytes("QRoundedFrame.RuntimeSecrets.v1");
@@ -2713,12 +2842,59 @@ QVariantMap RuntimeSecrets::readVault() const
             }
             qWarning() << "RuntimeSecrets load failed: CryptUnprotectData" << GetLastError();
             return {};
-        }
+#elif defined(QROUNDEDFRAME_HAS_OPENSSL)
+            QByteArray decrypted = decryptLocalPayload(fileData);
+            if (!decrypted.isEmpty()) {
+                QVariantMap values = parseObject(decrypted, m_vaultFile);
+                if (!values.isEmpty())
+                    return values;
+            }
+            qWarning() << "RuntimeSecrets: local decryption failed";
+            return {};
+#else
+            return {};
 #endif
-        const QVariantMap values = parseObject(payload, m_vaultFile);
+        }
+
+        if (fileData.startsWith("QRFS1\n")) {
+#if defined(Q_OS_WIN)
+            const QByteArray decoded = QByteArray::fromBase64(fileData.mid(6).trimmed());
+            if (decoded.isEmpty())
+                return {};
+            DATA_BLOB input {};
+            input.pbData = const_cast<BYTE *>(reinterpret_cast<const BYTE *>(decoded.constData()));
+            input.cbData = static_cast<DWORD>(decoded.size());
+            DATA_BLOB output {};
+            DATA_BLOB entropy {};
+            const QByteArray entropyBytes("QRoundedFrame.RuntimeSecrets.v1");
+            entropy.pbData = reinterpret_cast<BYTE *>(const_cast<char *>(entropyBytes.constData()));
+            entropy.cbData = static_cast<DWORD>(entropyBytes.size());
+            if (CryptUnprotectData(&input, nullptr, &entropy, nullptr, nullptr, 0, &output)) {
+                const QByteArray decrypted(reinterpret_cast<const char *>(output.pbData), int(output.cbData));
+                LocalFree(output.pbData);
+                return parseObject(decrypted, m_vaultFile);
+            }
+            qWarning() << "RuntimeSecrets load failed: CryptUnprotectData" << GetLastError();
+            return {};
+#else
+            qWarning() << "RuntimeSecrets ignoring Windows-encrypted vault on non-Windows platform";
+            return {};
+#endif
+        }
+
+        const QVariantMap values = parseObject(fileData, m_vaultFile);
         if (!values.isEmpty())
             return values;
     }
+
+#if defined(Q_OS_LINUX) && defined(QROUNDEDFRAME_HAS_LIBSECRET)
+    const QByteArray secretServicePayload = readSecretServiceVault();
+    if (!secretServicePayload.isEmpty()) {
+        const QVariantMap values = parseObject(secretServicePayload, QStringLiteral("Secret Service"));
+        if (!values.isEmpty())
+            return values;
+    }
+#endif
 
     QFile legacy(m_legacyVaultFile);
     if (legacy.exists() && legacy.open(QIODevice::ReadOnly))
@@ -3003,7 +3179,7 @@ void RuntimeApp::refreshTitleBarResourceStats()
 #ifdef Q_OS_WIN
         stats.insert(QStringLiteral("memory"), memory.value(QStringLiteral("ws_private"), 0.0).toDouble());
 #elif defined(Q_OS_LINUX)
-        stats.insert(QStringLiteral("memory"), memory.value(QStringLiteral("uss"), memory.value(QStringLiteral("private"), memory.value(QStringLiteral("rss"), 0.0))).toDouble());
+        stats.insert(QStringLiteral("memory"), memory.value(QStringLiteral("ws_private"), memory.value(QStringLiteral("private"), memory.value(QStringLiteral("rss"), 0.0))).toDouble());
 #else
         stats.insert(QStringLiteral("memory"), memory.value(QStringLiteral("private"), memory.value(QStringLiteral("rss"), 0.0)).toDouble());
 #endif
@@ -3318,9 +3494,19 @@ void RuntimeApp::trimMemoryNow()
     if (m_cardGlowProvider)
         m_cardGlowProvider->clearCache();
     if (m_engine) {
-        m_engine->trimComponentCache();
+        m_engine->clearComponentCache();
         m_engine->collectGarbage();
     }
+    releaseWorkingSet();
+}
+
+void RuntimeApp::releaseWorkingSet()
+{
+#ifdef Q_OS_WIN
+    EmptyWorkingSet(GetCurrentProcess());
+#elif defined(Q_OS_UNIX)
+    malloc_trim(0);
+#endif
 }
 
 void RuntimeApp::trimMemoryAfterPageSettled()
@@ -3387,9 +3573,7 @@ void RuntimeApp::emptyWorkingSetIfIdle()
 {
     if (m_windowInteractionActive || m_visualTransitionActive)
         return;
-#ifdef Q_OS_WIN
-    EmptyWorkingSet(GetCurrentProcess());
-#endif
+    releaseWorkingSet();
 }
 
 void RuntimeApp::requestOpenChild(const QString &pageKey, const QString &mode, const QVariant &props)

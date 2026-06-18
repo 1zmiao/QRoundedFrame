@@ -34,6 +34,13 @@ Item {
     property string _revealModeKey: storageKey.length > 0 ? ("fieldRevealModes/" + storageKey) : ""
     readonly property bool _hasInputContent: input.text.length > 0 || input.preeditText.length > 0
     readonly property bool _placeholderFloated: floatingPlaceholder && root.placeholderText.length > 0 && root._hasInputContent
+    readonly property real _placeholderTextWidth: _placeholderMetrics.advanceWidth + (root._placeholderFloated ? Core.Theme.dp(8) : 0)
+
+    TextMetrics {
+        id: _placeholderMetrics
+        font: placeholder.font
+        text: root.placeholderText
+    }
 
     function applyPersistedStorageMode() {
         if (!storageKey || storageKey.length === 0 || typeof App === "undefined" || !App || !App.settings)
@@ -210,7 +217,7 @@ Item {
         x: root.padding - (root._placeholderFloated ? Core.Theme.dp(4) : 0)
         y: root._placeholderFloated ? -Core.Theme.dp(7) : Math.round((root.height - height) / 2)
         width: root._placeholderFloated
-               ? Math.min(implicitWidth + Core.Theme.dp(1), Math.max(0, parent.width - root.padding - trailing.width - Core.Theme.dp(13)))
+               ? Math.min(root._placeholderTextWidth, Math.max(0, parent.width - root.padding - trailing.width - Core.Theme.dp(13)))
                : Math.max(0, parent.width - root.padding - trailing.width - Core.Theme.dp(13))
         height: implicitHeight
         visible: root.placeholderText.length > 0 && (!root._hasInputContent || root._placeholderFloated)
@@ -220,6 +227,7 @@ Item {
         font.pixelSize: root._placeholderFloated ? Math.max(Core.Theme.dp(9), Core.Theme.fontSize.caption - Core.Theme.dp(2)) : Core.Theme.fontSize.control
         font.family: Core.Theme.appFontFamily
         elide: Text.ElideRight
+        clip: true
         leftPadding: root._placeholderFloated ? Core.Theme.dp(4) : 0
         rightPadding: root._placeholderFloated ? Core.Theme.dp(4) : 0
         Behavior on color { ColorAnimation { duration: Core.Theme.animatedColorTransitionMs; easing.type: Easing.InOutCubic } }

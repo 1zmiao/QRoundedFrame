@@ -396,6 +396,7 @@ private:
     double currentProcessCpuPercent();
     double currentProcessGpuPercent();
     void closeGpuCounters();
+    void releaseWorkingSet();
     QString m_rootPath;
     QString m_dataRootPath;
     QPointer<QQmlEngine> m_engine;

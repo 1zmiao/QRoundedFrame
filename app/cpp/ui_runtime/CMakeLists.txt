@@ -56,7 +56,7 @@ if(UNIX AND NOT APPLE AND LIBSECRET_FOUND)
 endif()
 
 if(WIN32)
-    target_link_libraries(QRoundedFrame PRIVATE Crypt32)
+    target_link_libraries(QRoundedFrame PRIVATE Crypt32 Pdh)
 endif()
 
 set_target_properties(QRoundedFrame PROPERTIES

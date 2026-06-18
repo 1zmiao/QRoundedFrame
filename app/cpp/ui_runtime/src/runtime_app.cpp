@@ -47,6 +47,8 @@
 #include <windowsx.h>
 #include <wincrypt.h>
 #include <psapi.h>
+#include <pdh.h>
+#include <pdhmsg.h>
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <winternl.h>
@@ -189,6 +191,10 @@ QVariantMap defaultSettings()
         {QStringLiteral("ui"), QVariantMap{
             {QStringLiteral("lastPage"), QStringLiteral("home")},
             {QStringLiteral("showColorButton"), true},
+            {QStringLiteral("showTitleBarResourceStats"), false},
+            {QStringLiteral("showTitleBarCpu"), false},
+            {QStringLiteral("showTitleBarMemory"), false},
+            {QStringLiteral("showTitleBarGpu"), false},
             {QStringLiteral("fontScale"), 1.0},
         }},
         {QStringLiteral("layout"), QVariantMap{
@@ -532,6 +538,16 @@ double bytesToMb(qulonglong bytes)
 {
     return double(bytes) / 1024.0 / 1024.0;
 }
+
+#ifdef Q_OS_WIN
+quint64 fileTimeToUInt64(const FILETIME &time)
+{
+    ULARGE_INTEGER value = {};
+    value.LowPart = time.dwLowDateTime;
+    value.HighPart = time.dwHighDateTime;
+    return value.QuadPart;
+}
+#endif
 
 #ifdef Q_OS_LINUX
 double kbToMb(qulonglong kb)
@@ -2841,8 +2857,31 @@ RuntimeApp::RuntimeApp(QString rootPath, QString dataRootPath, QQmlEngine *engin
     , m_secrets(m_dataRootPath)
     , m_taskStore(new TaskStore(m_dataRootPath, &m_performance, this))
 {
+#ifdef Q_OS_WIN
+    SYSTEM_INFO systemInfo = {};
+    GetSystemInfo(&systemInfo);
+    m_cpuProcessorCount = qMax(1, int(systemInfo.dwNumberOfProcessors));
+#elif defined(Q_OS_LINUX)
+    m_cpuProcessorCount = qMax(1, int(sysconf(_SC_NPROCESSORS_ONLN)));
+    m_cpuClockTicks = qMax(1L, sysconf(_SC_CLK_TCK));
+#endif
+    m_titleBarResourceStatsTimer.setInterval(1500);
+    m_titleBarResourceStatsTimer.setTimerType(Qt::VeryCoarseTimer);
+    connect(&m_titleBarResourceStatsTimer, &QTimer::timeout, this, &RuntimeApp::refreshTitleBarResourceStats);
+    connect(&m_settings, &RuntimeSettings::changed, this, [this](const QString &key, const QVariant &value) {
+        Q_UNUSED(value)
+        if (key == QLatin1String("ui/showTitleBarResourceStats")
+            || key == QLatin1String("ui/showTitleBarCpu")
+            || key == QLatin1String("ui/showTitleBarMemory")
+            || key == QLatin1String("ui/showTitleBarGpu")) {
+            syncTitleBarResourceStatsEnabled();
+        }
+    });
+    syncTitleBarResourceStatsEnabled();
+
     connect(qApp, &QCoreApplication::aboutToQuit, this, [this]() {
         saveRegisteredMainWindowState();
+        closeGpuCounters();
     });
 }
 
@@ -2897,6 +2936,210 @@ QVariantMap RuntimeApp::memorySample(bool includeWorkingSetPrivate) const
     sample.insert(QStringLiteral("pss"), 0.0);
     sample.insert(QStringLiteral("ws_private"), 0.0);
     return sample;
+}
+
+bool RuntimeApp::titleBarCpuEnabled() const
+{
+    const bool legacy = m_settings.valueOr(QStringLiteral("ui/showTitleBarResourceStats"), false).toBool();
+    return m_settings.valueOr(QStringLiteral("ui/showTitleBarCpu"), legacy).toBool();
+}
+
+bool RuntimeApp::titleBarMemoryEnabled() const
+{
+    const bool legacy = m_settings.valueOr(QStringLiteral("ui/showTitleBarResourceStats"), false).toBool();
+    return m_settings.valueOr(QStringLiteral("ui/showTitleBarMemory"), legacy).toBool();
+}
+
+bool RuntimeApp::titleBarGpuEnabled() const
+{
+    const bool legacy = m_settings.valueOr(QStringLiteral("ui/showTitleBarResourceStats"), false).toBool();
+    return m_settings.valueOr(QStringLiteral("ui/showTitleBarGpu"), legacy).toBool();
+}
+
+bool RuntimeApp::titleBarResourceStatsEnabledFromSettings() const
+{
+    return titleBarCpuEnabled() || titleBarMemoryEnabled() || titleBarGpuEnabled();
+}
+
+void RuntimeApp::syncTitleBarResourceStatsEnabled()
+{
+    const bool enabled = titleBarResourceStatsEnabledFromSettings();
+    if (m_titleBarResourceStatsEnabled == enabled)
+    {
+        refreshTitleBarResourceStats();
+        return;
+    }
+    m_titleBarResourceStatsEnabled = enabled;
+    emit titleBarResourceStatsEnabledChanged();
+    if (enabled) {
+        refreshTitleBarResourceStats();
+        m_titleBarResourceStatsTimer.start();
+    } else {
+        m_titleBarResourceStatsTimer.stop();
+        closeGpuCounters();
+        m_titleBarResourceStats = QVariantMap();
+        emit titleBarResourceStatsChanged();
+    }
+}
+
+void RuntimeApp::refreshTitleBarResourceStats()
+{
+    if (!m_titleBarResourceStatsEnabled)
+        return;
+    const bool cpuEnabled = titleBarCpuEnabled();
+    const bool memoryEnabled = titleBarMemoryEnabled();
+    const bool gpuEnabled = titleBarGpuEnabled();
+    if (!cpuEnabled && !memoryEnabled && !gpuEnabled) {
+        syncTitleBarResourceStatsEnabled();
+        return;
+    }
+    QVariantMap stats;
+    stats.insert(QStringLiteral("cpuEnabled"), cpuEnabled);
+    stats.insert(QStringLiteral("memoryEnabled"), memoryEnabled);
+    stats.insert(QStringLiteral("gpuEnabled"), gpuEnabled);
+    stats.insert(QStringLiteral("cpu"), cpuEnabled ? currentProcessCpuPercent() : -1.0);
+    if (memoryEnabled) {
+        const QVariantMap memory = memorySample(true);
+#ifdef Q_OS_WIN
+        stats.insert(QStringLiteral("memory"), memory.value(QStringLiteral("ws_private"), 0.0).toDouble());
+#elif defined(Q_OS_LINUX)
+        stats.insert(QStringLiteral("memory"), memory.value(QStringLiteral("uss"), memory.value(QStringLiteral("private"), memory.value(QStringLiteral("rss"), 0.0))).toDouble());
+#else
+        stats.insert(QStringLiteral("memory"), memory.value(QStringLiteral("private"), memory.value(QStringLiteral("rss"), 0.0)).toDouble());
+#endif
+    } else {
+        stats.insert(QStringLiteral("memory"), -1.0);
+    }
+    stats.insert(QStringLiteral("gpu"), gpuEnabled ? currentProcessGpuPercent() : -1.0);
+    if (!gpuEnabled)
+        closeGpuCounters();
+    if (stats == m_titleBarResourceStats)
+        return;
+    m_titleBarResourceStats = stats;
+    emit titleBarResourceStatsChanged();
+}
+
+double RuntimeApp::currentProcessCpuPercent()
+{
+#ifdef Q_OS_WIN
+    FILETIME creation = {};
+    FILETIME exit = {};
+    FILETIME kernel = {};
+    FILETIME user = {};
+    FILETIME wall = {};
+    GetSystemTimeAsFileTime(&wall);
+    if (!GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user))
+        return -1.0;
+    const quint64 processTime = fileTimeToUInt64(kernel) + fileTimeToUInt64(user);
+    const quint64 wallTime = fileTimeToUInt64(wall);
+    if (m_lastCpuProcessTime100ns == 0 || m_lastCpuWallTime100ns == 0 || wallTime <= m_lastCpuWallTime100ns) {
+        m_lastCpuProcessTime100ns = processTime;
+        m_lastCpuWallTime100ns = wallTime;
+        return 0.0;
+    }
+    const double processDelta = double(processTime - m_lastCpuProcessTime100ns);
+    const double wallDelta = double(wallTime - m_lastCpuWallTime100ns);
+    m_lastCpuProcessTime100ns = processTime;
+    m_lastCpuWallTime100ns = wallTime;
+    return qBound(0.0, processDelta * 100.0 / wallDelta / double(m_cpuProcessorCount), 999.0);
+#elif defined(Q_OS_LINUX)
+    QFile file(QStringLiteral("/proc/self/stat"));
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return -1.0;
+    const QByteArray line = file.readAll();
+    const int closeParen = line.lastIndexOf(')');
+    if (closeParen < 0)
+        return -1.0;
+    const QList<QByteArray> fields = line.mid(closeParen + 2).split(' ');
+    if (fields.size() < 15)
+        return -1.0;
+    const quint64 userTicks = fields.value(11).toULongLong();
+    const quint64 kernelTicks = fields.value(12).toULongLong();
+    const quint64 processTicks = userTicks + kernelTicks;
+    const qint64 wallMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_lastCpuWallMs <= 0 || wallMs <= m_lastCpuWallMs) {
+        m_lastCpuProcessTicks = processTicks;
+        m_lastCpuWallMs = wallMs;
+        return 0.0;
+    }
+    const double processMs = double(processTicks - m_lastCpuProcessTicks) * 1000.0 / double(m_cpuClockTicks);
+    const double wallDelta = double(wallMs - m_lastCpuWallMs);
+    m_lastCpuProcessTicks = processTicks;
+    m_lastCpuWallMs = wallMs;
+    return qBound(0.0, processMs * 100.0 / wallDelta / double(m_cpuProcessorCount), 999.0);
+#else
+    return -1.0;
+#endif
+}
+
+double RuntimeApp::currentProcessGpuPercent()
+{
+#ifdef Q_OS_WIN
+    if (!m_gpuCountersReady) {
+        if (PdhOpenQueryW(nullptr, 0, &m_gpuQuery) != ERROR_SUCCESS)
+            return -1.0;
+        const PDH_STATUS status = PdhAddEnglishCounterW(
+            m_gpuQuery,
+            L"\\GPU Engine(*)\\Utilization Percentage",
+            0,
+            &m_gpuCounter);
+        if (status != ERROR_SUCCESS) {
+            closeGpuCounters();
+            return -1.0;
+        }
+        PdhCollectQueryData(m_gpuQuery);
+        m_gpuCountersReady = true;
+        return 0.0;
+    }
+    if (PdhCollectQueryData(m_gpuQuery) != ERROR_SUCCESS)
+        return -1.0;
+
+    DWORD bufferSize = 0;
+    DWORD itemCount = 0;
+    PDH_STATUS status = PdhGetFormattedCounterArrayW(
+        m_gpuCounter,
+        PDH_FMT_DOUBLE,
+        &bufferSize,
+        &itemCount,
+        nullptr);
+    if (status != PDH_MORE_DATA || bufferSize == 0 || itemCount == 0)
+        return -1.0;
+
+    QByteArray buffer(int(bufferSize), Qt::Uninitialized);
+    auto *items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W *>(buffer.data());
+    status = PdhGetFormattedCounterArrayW(
+        m_gpuCounter,
+        PDH_FMT_DOUBLE,
+        &bufferSize,
+        &itemCount,
+        items);
+    if (status != ERROR_SUCCESS)
+        return -1.0;
+
+    const QString pidNeedle = QStringLiteral("pid_%1_").arg(GetCurrentProcessId());
+    double total = 0.0;
+    for (DWORD i = 0; i < itemCount; ++i) {
+        if (items[i].FmtValue.CStatus != ERROR_SUCCESS || !items[i].szName)
+            continue;
+        const QString name = QString::fromWCharArray(items[i].szName);
+        if (name.contains(pidNeedle, Qt::CaseInsensitive))
+            total += items[i].FmtValue.doubleValue;
+    }
+    return qBound(0.0, total, 999.0);
+#else
+    return -1.0;
+#endif
+}
+
+void RuntimeApp::closeGpuCounters()
+{
+#ifdef Q_OS_WIN
+    if (m_gpuQuery)
+        PdhCloseQuery(m_gpuQuery);
+    m_gpuQuery = nullptr;
+    m_gpuCounter = nullptr;
+    m_gpuCountersReady = false;
+#endif
 }
 
 void RuntimeApp::requestMemorySample(bool includeWorkingSetPrivate)

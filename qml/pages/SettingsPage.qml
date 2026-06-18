@@ -93,6 +93,24 @@ Item {
                         else if (root.appReady && App.settings) App.settings.setValue("ui/showColorButton", checked)
                     }
                 }
+                AppCheckBox {
+                    text: "标题栏显示 CPU"
+                    storageKey: "ui/showTitleBarCpu"
+                    checked: false
+                    autoLoad: true
+                }
+                AppCheckBox {
+                    text: "标题栏显示内存"
+                    storageKey: "ui/showTitleBarMemory"
+                    checked: false
+                    autoLoad: true
+                }
+                AppCheckBox {
+                    text: "标题栏显示 GPU"
+                    storageKey: "ui/showTitleBarGpu"
+                    checked: false
+                    autoLoad: true
+                }
 
                 Rectangle {
                     width: parent.width

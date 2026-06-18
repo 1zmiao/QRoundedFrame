@@ -8,6 +8,7 @@
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QString>
+#include <QTimer>
 #include <QWindow>
 #include <QVariant>
 #include <QVariantMap>
@@ -19,6 +20,7 @@ class QSystemTrayIcon;
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <pdh.h>
 #endif
 
 class CardGlowProvider;
@@ -335,6 +337,8 @@ class RuntimeApp : public QObject {
     Q_PROPERTY(QObject *dialogs READ dialogs CONSTANT)
     Q_PROPERTY(QObject *secrets READ secrets CONSTANT)
     Q_PROPERTY(QObject *taskStore READ taskStore CONSTANT)
+    Q_PROPERTY(bool titleBarResourceStatsEnabled READ titleBarResourceStatsEnabled NOTIFY titleBarResourceStatsEnabledChanged)
+    Q_PROPERTY(QVariantMap titleBarResourceStats READ titleBarResourceStats NOTIFY titleBarResourceStatsChanged)
 public:
     RuntimeApp(QString rootPath, QString dataRootPath, QQmlEngine *engine, CardGlowProvider *cardGlowProvider, QObject *parent = nullptr);
     QObject *settings() { return &m_settings; }
@@ -345,6 +349,8 @@ public:
     QObject *dialogs() { return &m_dialogs; }
     QObject *secrets() { return &m_secrets; }
     QObject *taskStore();
+    bool titleBarResourceStatsEnabled() const { return m_titleBarResourceStatsEnabled; }
+    QVariantMap titleBarResourceStats() const { return m_titleBarResourceStats; }
     Q_INVOKABLE QString envValue(const QString &name) const;
     Q_INVOKABLE QString pageTitle(const QString &pageKey) const;
     Q_INVOKABLE QString pageSource(const QString &pageKey) const;
@@ -374,11 +380,22 @@ signals:
     void prepareChildRequested(const QString &pageKey, const QString &mode);
     void openChildRequested(const QString &pageKey, const QString &mode, const QVariant &props);
     void memorySampleReady(const QVariantMap &sample);
+    void titleBarResourceStatsEnabledChanged();
+    void titleBarResourceStatsChanged();
 private:
     bool autoMemoryTrimEnabled() const;
     double pageTrimThresholdMb() const;
     void scheduleAggressiveTrimAfterPageSettled();
     void emptyWorkingSetIfIdle();
+    bool titleBarResourceStatsEnabledFromSettings() const;
+    bool titleBarCpuEnabled() const;
+    bool titleBarMemoryEnabled() const;
+    bool titleBarGpuEnabled() const;
+    void syncTitleBarResourceStatsEnabled();
+    void refreshTitleBarResourceStats();
+    double currentProcessCpuPercent();
+    double currentProcessGpuPercent();
+    void closeGpuCounters();
     QString m_rootPath;
     QString m_dataRootPath;
     QPointer<QQmlEngine> m_engine;
@@ -398,4 +415,20 @@ private:
     QPointer<QObject> m_mainWindowObject;
     bool m_windowInteractionActive = false;
     bool m_visualTransitionActive = false;
+    bool m_titleBarResourceStatsEnabled = false;
+    QVariantMap m_titleBarResourceStats;
+    QTimer m_titleBarResourceStatsTimer;
+#ifdef Q_OS_WIN
+    int m_cpuProcessorCount = 1;
+    quint64 m_lastCpuProcessTime100ns = 0;
+    quint64 m_lastCpuWallTime100ns = 0;
+    bool m_gpuCountersReady = false;
+    PDH_HQUERY m_gpuQuery = nullptr;
+    PDH_HCOUNTER m_gpuCounter = nullptr;
+#elif defined(Q_OS_LINUX)
+    long m_cpuClockTicks = 100;
+    int m_cpuProcessorCount = 1;
+    quint64 m_lastCpuProcessTicks = 0;
+    qint64 m_lastCpuWallMs = 0;
+#endif
 };

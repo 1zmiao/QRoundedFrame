@@ -24,6 +24,8 @@ Item {
     property bool showThemeButton: true
     property bool showPinButton: true
     property bool showWindowControls: true
+    property bool showResourceStats: false
+    property var resourceStats: ({})
     property bool useNativeCaption: false
     property bool systemMoveOnPress: false
     property var popupHost: null
@@ -64,6 +66,37 @@ Item {
     property var _pressItem: null
     property double _lastPressAt: 0
     property bool _lastPressWasClick: false
+
+    function _formatPercent(value) {
+        if (value === undefined || value === null || value < 0)
+            return "--"
+        if (value < 10)
+            return value.toFixed(1) + "%"
+        return Math.round(value) + "%"
+    }
+
+    function _formatMb(value) {
+        if (value === undefined || value === null || value < 0)
+            return "--"
+        return Math.round(value) + "M"
+    }
+
+    function _resourceStatsParts() {
+        const parts = []
+        if (root.resourceStats.cpuEnabled)
+            parts.push("CPU " + root._formatPercent(root.resourceStats.cpu))
+        if (root.resourceStats.memoryEnabled)
+            parts.push("Mem " + root._formatMb(root.resourceStats.memory))
+        if (root.resourceStats.gpuEnabled)
+            parts.push("GPU " + root._formatPercent(root.resourceStats.gpu))
+        const result = []
+        for (let i = 0; i < parts.length; ++i) {
+            if (i > 0)
+                result.push("|")
+            result.push(parts[i])
+        }
+        return result
+    }
 
     signal activateRequested()
     signal moveRequested(real localX, real localY)
@@ -336,6 +369,40 @@ Item {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         spacing: root.titleButtonSpacing
+
+        Item {
+            id: resourceStatsBlock
+            readonly property real requiredWindowWidth: leftArea.width
+                                                       + statsRow.implicitWidth
+                                                       + Core.Theme.dp(178)
+                                                       + root.titleOuterLeftMargin
+                                                       + root.titleOuterRightMargin
+            visible: root.showResourceStats
+                     && statsRow.implicitWidth > 0
+                     && root.width >= requiredWindowWidth
+            width: visible ? statsRow.implicitWidth + Core.Theme.dp(10) : 0
+            height: visible ? Math.max(Core.Theme.dp(18), Math.round(root.rightButtonSize * 0.72)) : 0
+            anchors.verticalCenter: parent.verticalCenter
+
+            Row {
+                id: statsRow
+                anchors.centerIn: parent
+                spacing: Core.Theme.dp(4)
+
+                Repeater {
+                    model: root._resourceStatsParts()
+                    Text {
+                        text: modelData
+                        color: Core.Theme.color.mutedText
+                        font.family: Core.Theme.appFontFamily
+                        font.pixelSize: Math.max(Core.Theme.dp(10), Core.Theme.fontSize.caption - 1)
+                        verticalAlignment: Text.AlignVCenter
+                        renderType: Text.NativeRendering
+                        Behavior on color { ColorAnimation { duration: Core.Theme.animatedColorTransitionMs; easing.type: Easing.InOutCubic } }
+                    }
+                }
+            }
+        }
 
         Loader {
             id: paletteButtonLoader

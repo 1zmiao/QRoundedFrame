@@ -337,6 +337,8 @@ Window {
                 showColorButton: root.showColorButton
                 showThemeButton: root.showThemeButton
                 showPinButton: root.showPinButton
+                showResourceStats: root.bridge && root.bridge.titleBarResourceStatsEnabled
+                resourceStats: root.bridge && root.bridge.titleBarResourceStats ? root.bridge.titleBarResourceStats : ({})
                 showWindowControls: root.customChromeEnabled
                 windowMaximized: root.bridge && root.bridge.window ? root.bridge.window.isMaximizedState(root) : root.visibility === Window.Maximized
                 useNativeCaption: root.customChromeEnabled && Qt.platform.os === "windows" && root.bridge && root.bridge.window && root.bridge.window.nativeResize

@@ -561,6 +561,8 @@ Window {
                 showColorButton: root.showColorButton
                 showThemeButton: root.showThemeButton
                 showPinButton: root.showPinButton
+                showResourceStats: typeof App !== "undefined" && App && App.titleBarResourceStatsEnabled
+                resourceStats: (typeof App !== "undefined" && App && App.titleBarResourceStats) ? App.titleBarResourceStats : ({})
                 windowMaximized: root.windowMaximized
                 useNativeCaption: !linuxCsdController.interactiveCaptionMode
                 systemMoveOnPress: linuxCsdController.interactiveCaptionMode

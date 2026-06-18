@@ -88,11 +88,17 @@ sudo apt-get install cmake g++ ninja-build \
 
 ### Windows
 
-- Visual Studio 2022 — 安装时勾选"使用 C++ 的桌面开发"工作负载
-- Qt 6.6+ — 推荐 6.11，可通过 [Qt Online Installer](https://www.qt.io/download) 安装 `msvc2022_64` 版本
-    - 安装后设置环境变量 `FRAMELESS_QT_PREFIX` 指向 Qt 目录（如 `Z:\Qt\6.11.1\msvc2022_64`），否则脚本会使用默认路径
-- CMake 3.21+ — Visual Studio 安装程序可选附带，也可单独安装
-- Python 3 — 用于 `run.py` 开发启动入口
+- Visual Studio 2022 Build Tools，安装时勾选"使用 C++ 的桌面开发"工作负载，至少需要：
+    - MSVC v143 x64/x86 build tools
+    - Windows 10 SDK 或 Windows 11 SDK
+    - C++ CMake tools for Windows
+- Qt 6.6+，推荐 Qt 6.11.x MSVC 2022 64-bit 开发包。
+    - 必须安装 MSVC 版，例如 `Qt\6.11.x\msvc2022_64`，不要使用 MinGW 版。
+    - 安装后设置环境变量 `FRAMELESS_QT_PREFIX` 指向 Qt 目录（如 `Z:\Qt\6.11.1\msvc2022_64`），否则脚本会使用默认路径。
+- CMake 3.27+，Visual Studio 安装程序可选附带，也可单独安装。
+- Ninja，可使用 Visual Studio 附带版本，也可使用 Qt Tools 里的 Ninja。
+- Git，用于拉取仓库、提交和同步第三方源码。
+- Python 3.10，用于 `run.py` 开发启动入口、检查脚本和打包脚本。
 
 ### 运行依赖
 

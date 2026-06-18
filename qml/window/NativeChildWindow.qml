@@ -12,6 +12,7 @@ AppWindow {
     showColorButton: false
     showThemeButton: false
     showPinButton: childTopmostEnabled
+    showTitleBarResourceStats: false
     title: pageTitle
     width: 760
     height: 520

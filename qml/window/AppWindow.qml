@@ -29,6 +29,7 @@ Window {
     property bool showColorButton: Core.Theme.showColorButton
     property bool showThemeButton: true
     property bool showPinButton: true
+    property bool showTitleBarResourceStats: true
     property bool lowMemoryVisuals: root.windowKey !== "main"
     property bool autoRestoreWindowState: true
     property bool autoShow: true
@@ -561,7 +562,7 @@ Window {
                 showColorButton: root.showColorButton
                 showThemeButton: root.showThemeButton
                 showPinButton: root.showPinButton
-                showResourceStats: typeof App !== "undefined" && App && App.titleBarResourceStatsEnabled
+                showResourceStats: root.showTitleBarResourceStats && typeof App !== "undefined" && App && App.titleBarResourceStatsEnabled
                 resourceStats: (typeof App !== "undefined" && App && App.titleBarResourceStats) ? App.titleBarResourceStats : ({})
                 windowMaximized: root.windowMaximized
                 useNativeCaption: !linuxCsdController.interactiveCaptionMode

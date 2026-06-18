@@ -8,6 +8,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJSValue>
 #include <QSet>
 #include <QSqlDatabase>
 #include <QSqlError>
@@ -28,7 +29,18 @@ QVariantMap variantToMap(const QVariant &value)
 {
     if (value.canConvert<QVariantMap>())
         return value.toMap();
+    if (value.canConvert<QJSValue>()) {
+        const QJSValue js = value.value<QJSValue>();
+        const QVariant converted = js.toVariant();
+        if (converted.canConvert<QVariantMap>())
+            return converted.toMap();
+    }
     return {};
+}
+
+QString compactJsonObject(const QVariant &value)
+{
+    return QString::fromUtf8(QJsonDocument(QJsonObject::fromVariantMap(variantToMap(value))).toJson(QJsonDocument::Compact));
 }
 
 QSqlDatabase openConnection(const QString &connectionName, const QString &dbPath)
@@ -537,7 +549,7 @@ void TaskStore::saveTaskDetails(int taskId, const QVariant &values)
     query.addBindValue(qBound(0, data.value(QStringLiteral("progress"), 0).toInt(), 100));
     query.addBindValue(data.value(QStringLiteral("priority"), QStringLiteral("普通")).toString());
     query.addBindValue(data.value(QStringLiteral("duration"), QStringLiteral("-")).toString());
-    query.addBindValue(QString::fromUtf8(QJsonDocument(QJsonObject::fromVariantMap(data.value(QStringLiteral("params")).toMap())).toJson(QJsonDocument::Compact)));
+    query.addBindValue(compactJsonObject(data.value(QStringLiteral("params"))));
     query.addBindValue(taskId);
     query.exec();
     refresh();
@@ -567,7 +579,7 @@ void TaskStore::createTask(const QVariant &values)
         query.bindValue(4, qBound(0, data.value(QStringLiteral("progress"), 0).toInt(), 100));
         query.bindValue(5, data.value(QStringLiteral("priority"), QStringLiteral("普通")).toString());
         query.bindValue(6, data.value(QStringLiteral("duration"), QStringLiteral("-")).toString());
-        query.bindValue(7, QString::fromUtf8(QJsonDocument(QJsonObject::fromVariantMap(data.value(QStringLiteral("params")).toMap())).toJson(QJsonDocument::Compact)));
+        query.bindValue(7, compactJsonObject(data.value(QStringLiteral("params"))));
         query.exec();
     }
     db.commit();
@@ -796,7 +808,7 @@ void TaskStore::importFile(const QString &path)
         insert.bindValue(4, qBound(0, task.value(QStringLiteral("progress"), 0).toInt(), 100));
         insert.bindValue(5, task.value(QStringLiteral("priority"), QStringLiteral("普通")).toString());
         insert.bindValue(6, task.value(QStringLiteral("duration"), QStringLiteral("-")).toString());
-        insert.bindValue(7, QString::fromUtf8(QJsonDocument(QJsonObject::fromVariantMap(task.value(QStringLiteral("params")).toMap())).toJson(QJsonDocument::Compact)));
+        insert.bindValue(7, compactJsonObject(task.value(QStringLiteral("params"))));
         if (!insert.exec()) {
             db.rollback();
             setStatusMessage(QStringLiteral("导入失败：写入任务失败"));

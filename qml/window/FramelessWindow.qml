@@ -126,6 +126,8 @@ Window {
             return
         const cx = px === undefined ? frameRoot.width / 2 : px
         const cy = py === undefined ? frameRoot.height / 2 : py
+        if (!root.lowMemoryVisuals && root.bridge && root.bridge.beginVisualTransition)
+            root.bridge.beginVisualTransition()
         root._localThemeAnimation = true
         if (root.bridge.theme.setRippleOrigin)
             root.bridge.theme.setRippleOrigin(cx, cy)
@@ -137,6 +139,7 @@ Window {
     function playTransition(cx, cy, mode) {
         if (root.lowMemoryVisuals)
             return
+        themeTransitionReleaseTimer.stop()
         pendingTransitionX = cx
         pendingTransitionY = cy
         pendingTransitionMode = mode
@@ -145,6 +148,13 @@ Window {
         } else {
             transitionLayer.active = true
         }
+    }
+
+    function prepareThemeTransition() {
+        if (root.lowMemoryVisuals || transitionLayer.active)
+            return
+        transitionLayer.active = true
+        themeTransitionReleaseTimer.restart()
     }
 
     function adjustFontScaleByWheel(deltaY) {
@@ -289,13 +299,23 @@ Window {
                 renderScale: Core.Theme.lowMemoryMode ? 0.15 : 0.35
                 onFinished: {
                     transitionLayer.active = false
-                    if (root.windowKey === "main" && root.bridge && root.bridge.trimMemory)
-                        Qt.callLater(root.bridge.trimMemory)
+                    if (root.windowKey === "main" && root.bridge && root.bridge.endVisualTransitionSoon)
+                        root.bridge.endVisualTransitionSoon()
                 }
             }
             onLoaded: {
                 if (item && root.pendingTransitionMode.length > 0)
                     item.play(root.pendingTransitionX, root.pendingTransitionY, root.pendingTransitionMode)
+            }
+        }
+
+        Timer {
+            id: themeTransitionReleaseTimer
+            interval: 1800
+            repeat: false
+            onTriggered: {
+                if (transitionLayer.active && transitionLayer.item && !transitionLayer.item.running)
+                    transitionLayer.active = false
             }
         }
 
@@ -349,6 +369,7 @@ Window {
                 onThemeToggleRequested: function(localPos, nextMode) {
                     root.changeThemeWithRipple(nextMode, localPos.x, localPos.y)
                 }
+                onThemeTogglePrepared: root.prepareThemeTransition()
 
                 onAlwaysOnTopRequested: function(enabled) {
                     root.alwaysOnTop = enabled

@@ -97,7 +97,7 @@ private:
     RuntimeSettings *m_settings = nullptr;
     QString m_mode = QStringLiteral("dark");
     QString m_lightPrimaryColor = QStringLiteral("#5886D9");
-    QString m_darkPrimaryColor = QStringLiteral("#3A3FAC");
+    QString m_darkPrimaryColor = QStringLiteral("#1D38AC");
     double m_fontScale = 1.0;
     double m_systemUiScale = 1.0;
     bool m_showColorButton = true;
@@ -317,8 +317,10 @@ public:
 private:
     void load();
     void save() const;
+    QVariantMap readVault() const;
     QString m_secureDir;
     QString m_vaultFile;
+    QString m_legacyVaultFile;
     QVariantMap m_values;
     bool m_loaded = false;
 };
@@ -358,6 +360,8 @@ public:
     Q_INVOKABLE void beginWindowInteraction();
     Q_INVOKABLE void endWindowInteraction();
     Q_INVOKABLE void endWindowInteractionSoon();
+    Q_INVOKABLE void beginVisualTransition();
+    Q_INVOKABLE void endVisualTransitionSoon();
     Q_INVOKABLE void exitApplication();
     Q_INVOKABLE void trimMemory();
     Q_INVOKABLE void trimMemoryNow();
@@ -393,4 +397,5 @@ private:
     TaskStore *m_taskStore = nullptr;
     QPointer<QObject> m_mainWindowObject;
     bool m_windowInteractionActive = false;
+    bool m_visualTransitionActive = false;
 };

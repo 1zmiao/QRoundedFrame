@@ -26,6 +26,7 @@ Item {
 
     signal clicked()
     signal rightClicked(real x, real y)
+    signal intent()
 
     width: Core.Theme.metrics.controlHeight
     height: Core.Theme.metrics.controlHeight
@@ -69,7 +70,9 @@ Item {
         enabled: root.interactive
         hoverEnabled: true
         acceptedButtons: root.acceptedButtons
+        onEntered: root.intent()
         onPressed: function(mouse) {
+            root.intent()
             if (root.clickOnPress && mouse.button === Qt.LeftButton) {
                 if (root.checkable)
                     root.checked = !root.checked

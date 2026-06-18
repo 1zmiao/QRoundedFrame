@@ -9,9 +9,9 @@ Item {
     property var memorySample: ({ "rss": 0, "private": 0 })
     property string updateStatus: ""
 
-    function refreshMemorySample() {
+    function refreshMemorySample(includeWorkingSetPrivate) {
         if (root.visible && root.appReady && App.requestMemorySample)
-            App.requestMemorySample()
+            App.requestMemorySample(includeWorkingSetPrivate === true)
     }
 
     function checkUpdate() {
@@ -28,7 +28,10 @@ Item {
         root.updateStatus = String(result.message || "当前已是最新版本")
     }
 
-    Component.onCompleted: root.refreshMemorySample()
+    Component.onCompleted: {
+        root.refreshMemorySample(false)
+        firstPrivateSample.restart()
+    }
 
     Connections {
         target: root.appReady ? App : null
@@ -43,7 +46,14 @@ Item {
         repeat: true
         running: root.visible
         triggeredOnStart: false
-        onTriggered: root.refreshMemorySample()
+        onTriggered: root.refreshMemorySample(true)
+    }
+
+    Timer {
+        id: firstPrivateSample
+        interval: 900
+        repeat: false
+        onTriggered: root.refreshMemorySample(true)
     }
 
     DragScrollArea {

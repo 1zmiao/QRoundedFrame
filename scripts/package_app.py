@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 
@@ -131,6 +132,23 @@ def copy_file(src: Path, dst: Path) -> None:
         raise FileNotFoundError(src)
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
+
+
+def archive_platform_suffix(target: str) -> str:
+    machine = platform.machine().lower()
+    arch = "x64" if machine in {"amd64", "x86_64"} else machine.replace(" ", "-") or "unknown"
+    return f"{target}-{arch}"
+
+
+def make_zip_archive(release_dir: Path, target: str) -> Path:
+    archive_path = release_dir.parent / f"{release_dir.name}-{archive_platform_suffix(target)}.zip"
+    if archive_path.exists():
+        archive_path.unlink()
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in sorted(release_dir.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(release_dir.parent).as_posix())
+    return archive_path
 
 
 def qt_prefix() -> Path:
@@ -459,11 +477,13 @@ def main() -> int:
         clean=not args.no_clean,
         target=args.target,
     )
+    archive_path = make_zip_archive(release_dir, args.target)
     print()
     if args.target == "windows":
         print(f"Packaged: {release_dir / (args.name + '.exe')}")
     else:
         print(f"Packaged: {release_dir / 'run.sh'}")
+    print(f"Archive:  {archive_path}")
     return 0
 
 

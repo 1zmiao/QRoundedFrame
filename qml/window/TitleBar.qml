@@ -73,6 +73,7 @@ Item {
     signal toggleMaximizeRequested()
     signal closeRequested()
     signal themeToggleRequested(point localPos, string nextMode)
+    signal themeTogglePrepared()
     signal alwaysOnTopRequested(bool enabled)
     signal toggleNavRequested()
     signal menuActionRequested(string action, string kind)
@@ -400,6 +401,7 @@ Item {
                 strokeWidth: 0.90
                 noBorder: true
                 tooltip: "日夜切换"
+                onIntent: root.themeTogglePrepared()
                 onClicked: {
                     const next = Core.Theme.mode === "dark" ? "light" : "dark"
                     const p = themeButton.mapToItem(root, themeButton.width / 2, themeButton.height / 2)

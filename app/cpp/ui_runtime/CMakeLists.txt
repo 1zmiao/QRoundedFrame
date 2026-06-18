@@ -8,6 +8,10 @@ set(CMAKE_AUTOMOC ON)
 find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Sql Concurrent Widgets)
 if(UNIX AND NOT APPLE)
     find_package(X11)
+    find_package(PkgConfig)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(LIBSECRET libsecret-1)
+    endif()
 endif()
 
 set(QROUNDEDFRAME_UI_SOURCES
@@ -42,6 +46,17 @@ if(UNIX AND NOT APPLE AND X11_FOUND)
     target_compile_definitions(QRoundedFrame PRIVATE QROUNDEDFRAME_HAS_X11=1)
     target_include_directories(QRoundedFrame PRIVATE ${X11_INCLUDE_DIR})
     target_link_libraries(QRoundedFrame PRIVATE ${X11_LIBRARIES})
+endif()
+
+if(UNIX AND NOT APPLE AND LIBSECRET_FOUND)
+    target_compile_definitions(QRoundedFrame PRIVATE QROUNDEDFRAME_HAS_LIBSECRET=1)
+    target_include_directories(QRoundedFrame PRIVATE ${LIBSECRET_INCLUDE_DIRS})
+    target_link_directories(QRoundedFrame PRIVATE ${LIBSECRET_LIBRARY_DIRS})
+    target_link_libraries(QRoundedFrame PRIVATE ${LIBSECRET_LIBRARIES})
+endif()
+
+if(WIN32)
+    target_link_libraries(QRoundedFrame PRIVATE Crypt32)
 endif()
 
 set_target_properties(QRoundedFrame PROPERTIES

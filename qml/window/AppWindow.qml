@@ -95,6 +95,7 @@ Window {
     property string pendingTransitionMode: ""
     property real pendingTransitionX: 0
     property real pendingTransitionY: 0
+    property bool transitionLayerPreloaded: false
     property bool firstFrameReady: false
     property bool firstFrameOpacityGate: root.windowKey === "main" && Qt.platform.os === "windows"
 
@@ -361,6 +362,8 @@ Window {
             return
         const cx = px === undefined ? frameRoot.width / 2 : px
         const cy = py === undefined ? frameRoot.height / 2 : py
+        if (!root.lowMemoryVisuals && root.bridge && root.bridge.beginVisualTransition)
+            root.bridge.beginVisualTransition()
         root._localThemeAnimation = true
         if (root.bridge.theme.setRippleOrigin)
             root.bridge.theme.setRippleOrigin(cx, cy)
@@ -372,6 +375,7 @@ Window {
     function playTransition(cx, cy, mode) {
         if (root.lowMemoryVisuals)
             return
+        themeTransitionReleaseTimer.stop()
         pendingTransitionX = cx
         pendingTransitionY = cy
         pendingTransitionMode = mode
@@ -380,6 +384,14 @@ Window {
         } else {
             transitionLayerLoader.active = true
         }
+    }
+
+    function prepareThemeTransition() {
+        if (root.lowMemoryVisuals || transitionLayerLoader.active)
+            return
+        transitionLayerPreloaded = true
+        transitionLayerLoader.active = true
+        themeTransitionReleaseTimer.restart()
     }
 
     function adjustFontScaleByWheel(deltaY) {
@@ -502,19 +514,32 @@ Window {
             id: transitionLayerLoader
             anchors.fill: parent
             z: 1
-            active: false
+            active: root.transitionLayerPreloaded
             sourceComponent: ThemeTransitionLayer {
                 radius: frameRoot.visualRadius
                 renderScale: Core.Theme.lowMemoryMode ? 0.15 : 0.35
                 onFinished: {
+                    root.transitionLayerPreloaded = false
                     transitionLayerLoader.active = false
-                    if (root.windowKey === "main" && root.bridge && root.bridge.trimMemoryNow)
-                        Qt.callLater(root.bridge.trimMemoryNow)
+                    if (root.windowKey === "main" && root.bridge && root.bridge.endVisualTransitionSoon)
+                        root.bridge.endVisualTransitionSoon()
                 }
             }
             onLoaded: {
                 if (item && root.pendingTransitionMode.length > 0)
                     item.play(root.pendingTransitionX, root.pendingTransitionY, root.pendingTransitionMode)
+            }
+        }
+
+        Timer {
+            id: themeTransitionReleaseTimer
+            interval: 1800
+            repeat: false
+            onTriggered: {
+                if (transitionLayerLoader.active && transitionLayerLoader.item && !transitionLayerLoader.item.running) {
+                    root.transitionLayerPreloaded = false
+                    transitionLayerLoader.active = false
+                }
             }
         }
 
@@ -580,6 +605,7 @@ Window {
                 onThemeToggleRequested: function(localPos, nextMode) {
                     root.changeThemeWithRipple(nextMode, localPos.x, localPos.y)
                 }
+                onThemeTogglePrepared: root.prepareThemeTransition()
                 onAlwaysOnTopRequested: function(enabled) {
                     root.alwaysOnTop = enabled
                     if (root.bridge && root.bridge.window)

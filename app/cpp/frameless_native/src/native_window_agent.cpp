@@ -413,59 +413,38 @@ bool NativeWindowAgent::nativeEventFilter(const QByteArray &eventType, void *mes
     if (msg->hwnd != hwnd && (!targetRoot || !messageRoot || targetRoot != messageRoot))
         return false;
 
-    if (msg->message == WM_NCHITTEST) {
-        const int hit = nativeSystemButtonHitTest(msg->lParam);
-        if (hit != HTNOWHERE) {
-            setNativeSystemButtonHover(hit);
-            if (result)
-                *result = hit;
-            return true;
-        }
-        LRESULT dwmResult = 0;
-        if (msg->hwnd == hwnd && DwmDefWindowProc(hwnd, msg->message, msg->wParam, msg->lParam, &dwmResult)) {
-            if (dwmResult == HTREDUCE || dwmResult == HTZOOM || dwmResult == HTCLOSE) {
-                setNativeSystemButtonHover(int(dwmResult));
-                if (result)
-                    *result = dwmResult;
-                return true;
-            }
-        }
+    switch (msg->message) {
+    case WM_NCHITTEST:
+    case WM_NCMOUSEMOVE:
+    case WM_NCLBUTTONDOWN:
+    case WM_NCLBUTTONUP:
+    case WM_NCLBUTTONDBLCLK:
+    case WM_NCRBUTTONDOWN:
+    case WM_NCRBUTTONUP:
+    case WM_NCRBUTTONDBLCLK:
+    case WM_NCMBUTTONDOWN:
+    case WM_NCMBUTTONUP:
+    case WM_NCMBUTTONDBLCLK:
+    case WM_NCXBUTTONDOWN:
+    case WM_NCXBUTTONUP:
+    case WM_NCXBUTTONDBLCLK:
+    case WM_NCPOINTERUPDATE:
+    case WM_NCPOINTERDOWN:
+    case WM_NCPOINTERUP:
+    case WM_NCMOUSEHOVER:
+        // Let QWindowKit own the full non-client input state machine. The
+        // project filter only handles shell-specific region/background/close
+        // behavior below; duplicating chrome hit-test and button press logic
+        // here races QWindowKit's cached hit-test state on fast drag/snap paths.
+        return false;
+    case WM_NCMOUSELEAVE:
+        setNativeSystemButtonHover(HTNOWHERE);
+        return false;
+    default:
+        break;
     }
 
     switch (msg->message) {
-    case WM_NCLBUTTONDOWN: {
-        const int hit = nativeSystemButtonHitTest(msg->lParam);
-        if (msg->hwnd == hwnd && (hit == HTREDUCE || hit == HTZOOM || hit == HTCLOSE)) {
-            setNativeSystemButtonHover(hit);
-            m_pressedNativeButtonHit = hit;
-            if (result)
-                *result = 0;
-            return true;
-        }
-        m_pressedNativeButtonHit = 0;
-        break;
-    }
-    case WM_NCLBUTTONUP: {
-        const int pressedHit = m_pressedNativeButtonHit;
-        m_pressedNativeButtonHit = 0;
-        if (msg->hwnd == hwnd && (pressedHit == HTREDUCE || pressedHit == HTZOOM || pressedHit == HTCLOSE)) {
-            const int releaseHit = nativeSystemButtonHitTest(msg->lParam);
-            if (releaseHit == pressedHit) {
-                if (pressedHit == HTREDUCE) {
-                    ShowWindow(hwnd, SW_MINIMIZE);
-                } else if (pressedHit == HTZOOM) {
-                    const WPARAM command = IsZoomed(hwnd) ? SC_RESTORE : SC_MAXIMIZE;
-                    SendMessageW(hwnd, WM_SYSCOMMAND, command, 0);
-                } else if (pressedHit == HTCLOSE) {
-                    SendMessageW(hwnd, WM_SYSCOMMAND, SC_CLOSE, 0);
-                }
-            }
-            if (result)
-                *result = 0;
-            return true;
-        }
-        break;
-    }
     case WM_LBUTTONUP:
     case WM_CANCELMODE:
     case WM_CAPTURECHANGED:
@@ -474,26 +453,6 @@ bool NativeWindowAgent::nativeEventFilter(const QByteArray &eventType, void *mes
     case WM_MOUSEMOVE:
         setNativeSystemButtonHover(HTNOWHERE);
         break;
-    case WM_NCMOUSEMOVE:
-    case WM_NCMOUSELEAVE: {
-        if (msg->message == WM_NCMOUSELEAVE)
-            setNativeSystemButtonHover(HTNOWHERE);
-        LRESULT dwmResult = 0;
-        if (msg->hwnd == hwnd && DwmDefWindowProc(hwnd, msg->message, msg->wParam, msg->lParam, &dwmResult)) {
-            if (result)
-                *result = dwmResult;
-            return true;
-        }
-        const int hitCode = int(msg->wParam & 0xFFFF);
-        if (msg->hwnd == hwnd && (hitCode == HTREDUCE || hitCode == HTZOOM || hitCode == HTCLOSE)
-            && nativeSystemButtonHitTest(msg->lParam) == hitCode) {
-            setNativeSystemButtonHover(hitCode);
-            if (result)
-                *result = DefWindowProcW(hwnd, msg->message, msg->wParam, msg->lParam);
-            return true;
-        }
-        break;
-    }
     case WM_NCCALCSIZE:
         if (m_customShadow && msg->hwnd == hwnd && msg->wParam) {
             // 自定义圆角 + Qt Quick live resize 时，新增客户区如果不让 Windows 失效重绘，

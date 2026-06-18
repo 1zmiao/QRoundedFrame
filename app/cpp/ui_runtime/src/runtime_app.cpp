@@ -16,6 +16,7 @@
 #include <QGuiApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QQmlEngine>
 #include <QJSValue>
 #include <QQuickWindow>
@@ -44,12 +45,17 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <windowsx.h>
+#include <wincrypt.h>
 #include <psapi.h>
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <winternl.h>
 #elif defined(Q_OS_UNIX)
 #include <unistd.h>
+#endif
+
+#if defined(Q_OS_LINUX) && defined(QROUNDEDFRAME_HAS_LIBSECRET)
+#include <libsecret/secret.h>
 #endif
 
 namespace {
@@ -190,9 +196,9 @@ QVariantMap defaultSettings()
         }},
         {QStringLiteral("theme"), QVariantMap{
             {QStringLiteral("mode"), QStringLiteral("dark")},
-            {QStringLiteral("primaryColor"), QStringLiteral("#3A3FAC")},
+            {QStringLiteral("primaryColor"), QStringLiteral("#1D38AC")},
             {QStringLiteral("lightPrimaryColor"), QStringLiteral("#5886D9")},
-            {QStringLiteral("darkPrimaryColor"), QStringLiteral("#3A3FAC")},
+            {QStringLiteral("darkPrimaryColor"), QStringLiteral("#1D38AC")},
         }},
         {QStringLiteral("window"), QVariantMap{
             {QStringLiteral("closeToTray"), false},
@@ -257,6 +263,77 @@ QVariantMap variantMapFromAny(const QVariant &value)
     }
     return {};
 }
+
+QVariant jsonSafeVariantFromAny(const QVariant &value)
+{
+    QVariant normalized = value;
+    if (value.canConvert<QJSValue>()) {
+        const QJSValue js = value.value<QJSValue>();
+        normalized = js.toVariant();
+    }
+
+    const QJsonValue jsonValue = QJsonValue::fromVariant(normalized);
+    return jsonValue.toVariant();
+}
+
+#if defined(Q_OS_LINUX) && defined(QROUNDEDFRAME_HAS_LIBSECRET)
+const SecretSchema *runtimeSecretSchema()
+{
+    static const SecretSchema schema = {
+        "local.qroundedframe.RuntimeSecrets",
+        SECRET_SCHEMA_NONE,
+        {
+            {"app", SECRET_SCHEMA_ATTRIBUTE_STRING},
+            {"name", SECRET_SCHEMA_ATTRIBUTE_STRING},
+            {nullptr, SECRET_SCHEMA_ATTRIBUTE_STRING},
+        }
+    };
+    return &schema;
+}
+
+QByteArray readSecretServiceVault()
+{
+    GError *error = nullptr;
+    gchar *password = secret_password_lookup_sync(
+        runtimeSecretSchema(),
+        nullptr,
+        &error,
+        "app", "QRoundedFrame",
+        "name", "RuntimeSecrets",
+        nullptr);
+    if (error) {
+        qWarning() << "RuntimeSecrets libsecret lookup failed" << QString::fromUtf8(error->message);
+        g_error_free(error);
+        return {};
+    }
+    if (!password)
+        return {};
+    const QByteArray payload(password);
+    secret_password_free(password);
+    return payload;
+}
+
+bool writeSecretServiceVault(const QByteArray &payload)
+{
+    GError *error = nullptr;
+    const gboolean ok = secret_password_store_sync(
+        runtimeSecretSchema(),
+        SECRET_COLLECTION_DEFAULT,
+        "QRoundedFrame secrets",
+        payload.constData(),
+        nullptr,
+        &error,
+        "app", "QRoundedFrame",
+        "name", "RuntimeSecrets",
+        nullptr);
+    if (error) {
+        qWarning() << "RuntimeSecrets libsecret store failed" << QString::fromUtf8(error->message);
+        g_error_free(error);
+        return false;
+    }
+    return ok == TRUE;
+}
+#endif
 
 bool envFlag(const char *name)
 {
@@ -642,11 +719,12 @@ QString RuntimeSettings::configDir() const
 
 void RuntimeSettings::setValue(const QString &key, const QVariant &value)
 {
-    setNestedValue(m_values, key, value);
+    const QVariant normalized = jsonSafeVariantFromAny(value);
+    setNestedValue(m_values, key, normalized);
     save();
     ++m_revision;
     emit revisionChanged();
-    emit changed(key, value);
+    emit changed(key, normalized);
 }
 
 void RuntimeSettings::remove(const QString &key)
@@ -819,8 +897,7 @@ void RuntimeTheme::setPrimaryColor(const QString &color)
         return;
     const QString normalized = qcolor.name(QColor::HexRgb).toUpper();
     QString &target = m_mode == QLatin1String("dark") ? m_darkPrimaryColor : m_lightPrimaryColor;
-    if (target == normalized)
-        return;
+    const bool changed = target != normalized;
     target = normalized;
     if (m_settings) {
         m_settings->setValue(m_mode == QLatin1String("dark")
@@ -828,7 +905,8 @@ void RuntimeTheme::setPrimaryColor(const QString &color)
             : QStringLiteral("theme/lightPrimaryColor"), normalized);
         m_settings->setValue(QStringLiteral("theme/primaryColor"), normalized);
     }
-    emit primaryColorChanged(normalized);
+    if (changed)
+        emit primaryColorChanged(normalized);
     emit primaryColorCommitted(normalized);
 }
 
@@ -2529,7 +2607,8 @@ RuntimeSecrets::RuntimeSecrets(const QString &rootPath, QObject *parent)
 {
     const QDir rootDir(rootPath);
     m_secureDir = rootDir.absoluteFilePath(QStringLiteral("user_data/secure"));
-    m_vaultFile = QDir(m_secureDir).absoluteFilePath(QStringLiteral("cpp_secrets.json"));
+    m_vaultFile = QDir(m_secureDir).absoluteFilePath(QStringLiteral("secrets.bin"));
+    m_legacyVaultFile = QDir(m_secureDir).absoluteFilePath(QStringLiteral("cpp_secrets.json"));
 }
 
 void RuntimeSecrets::load()
@@ -2537,22 +2616,98 @@ void RuntimeSecrets::load()
     if (m_loaded)
         return;
     m_loaded = true;
-    QFile file(m_vaultFile);
-    if (!file.exists() || !file.open(QIODevice::ReadOnly))
-        return;
-    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-    if (doc.isObject())
-        m_values = doc.object().toVariantMap();
+    m_values = readVault();
 }
 
 void RuntimeSecrets::save() const
 {
     QDir().mkpath(m_secureDir);
+    const QByteArray payload = QJsonDocument(QJsonObject::fromVariantMap(m_values)).toJson(QJsonDocument::Compact);
+#if defined(Q_OS_LINUX) && defined(QROUNDEDFRAME_HAS_LIBSECRET)
+    if (writeSecretServiceVault(payload))
+        return;
+    qWarning() << "RuntimeSecrets falling back to local file storage";
+#endif
     QSaveFile file(m_vaultFile);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
         return;
-    file.write(QJsonDocument(QJsonObject::fromVariantMap(m_values)).toJson(QJsonDocument::Compact));
+#ifdef Q_OS_WIN
+    DATA_BLOB input {};
+    input.pbData = reinterpret_cast<BYTE *>(const_cast<char *>(payload.constData()));
+    input.cbData = static_cast<DWORD>(payload.size());
+    DATA_BLOB output {};
+    DATA_BLOB entropy {};
+    const QByteArray entropyBytes("QRoundedFrame.RuntimeSecrets.v1");
+    entropy.pbData = reinterpret_cast<BYTE *>(const_cast<char *>(entropyBytes.constData()));
+    entropy.cbData = static_cast<DWORD>(entropyBytes.size());
+    if (!CryptProtectData(&input, L"QRoundedFrame secrets", &entropy, nullptr, nullptr, 0, &output)) {
+        qWarning() << "RuntimeSecrets save failed: CryptProtectData" << GetLastError();
+        return;
+    }
+    const QByteArray encrypted(reinterpret_cast<const char *>(output.pbData), int(output.cbData));
+    LocalFree(output.pbData);
+    file.write(QByteArrayLiteral("QRFS1\n"));
+    file.write(encrypted.toBase64());
+#else
+    file.write(payload);
+#endif
     file.commit();
+}
+
+QVariantMap RuntimeSecrets::readVault() const
+{
+    auto parseObject = [](const QByteArray &payload, const QString &source) -> QVariantMap {
+        QJsonParseError error {};
+        const QJsonDocument doc = QJsonDocument::fromJson(payload, &error);
+        if (!doc.isObject()) {
+            if (error.error != QJsonParseError::NoError)
+                qWarning() << "RuntimeSecrets parse failed" << source << error.errorString();
+            return {};
+        }
+        return doc.object().toVariantMap();
+    };
+
+#if defined(Q_OS_LINUX) && defined(QROUNDEDFRAME_HAS_LIBSECRET)
+    const QByteArray secretServicePayload = readSecretServiceVault();
+    if (!secretServicePayload.isEmpty()) {
+        const QVariantMap values = parseObject(secretServicePayload, QStringLiteral("Secret Service"));
+        if (!values.isEmpty())
+            return values;
+    }
+#endif
+
+    QFile vault(m_vaultFile);
+    if (vault.exists() && vault.open(QIODevice::ReadOnly)) {
+        QByteArray payload = vault.readAll();
+#ifdef Q_OS_WIN
+        if (payload.startsWith("QRFS1\n")) {
+            payload = QByteArray::fromBase64(payload.mid(6).trimmed());
+            DATA_BLOB input {};
+            input.pbData = reinterpret_cast<BYTE *>(payload.data());
+            input.cbData = static_cast<DWORD>(payload.size());
+            DATA_BLOB output {};
+            DATA_BLOB entropy {};
+            const QByteArray entropyBytes("QRoundedFrame.RuntimeSecrets.v1");
+            entropy.pbData = reinterpret_cast<BYTE *>(const_cast<char *>(entropyBytes.constData()));
+            entropy.cbData = static_cast<DWORD>(entropyBytes.size());
+            if (CryptUnprotectData(&input, nullptr, &entropy, nullptr, nullptr, 0, &output)) {
+                const QByteArray decrypted(reinterpret_cast<const char *>(output.pbData), int(output.cbData));
+                LocalFree(output.pbData);
+                return parseObject(decrypted, m_vaultFile);
+            }
+            qWarning() << "RuntimeSecrets load failed: CryptUnprotectData" << GetLastError();
+            return {};
+        }
+#endif
+        const QVariantMap values = parseObject(payload, m_vaultFile);
+        if (!values.isEmpty())
+            return values;
+    }
+
+    QFile legacy(m_legacyVaultFile);
+    if (legacy.exists() && legacy.open(QIODevice::ReadOnly))
+        return parseObject(legacy.readAll(), m_legacyVaultFile);
+    return {};
 }
 
 void RuntimeSecrets::preload()
@@ -2569,7 +2724,7 @@ QVariant RuntimeSecrets::get(const QString &key)
 void RuntimeSecrets::put(const QString &key, const QVariant &value)
 {
     load();
-    m_values.insert(key, value);
+    m_values.insert(key, jsonSafeVariantFromAny(value));
     save();
 }
 
@@ -2883,6 +3038,19 @@ void RuntimeApp::endWindowInteractionSoon()
     });
 }
 
+void RuntimeApp::beginVisualTransition()
+{
+    m_visualTransitionActive = true;
+    ++m_aggressiveTrimSerial;
+}
+
+void RuntimeApp::endVisualTransitionSoon()
+{
+    QTimer::singleShot(900, this, [this]() {
+        m_visualTransitionActive = false;
+    });
+}
+
 void RuntimeApp::exitApplication()
 {
 #ifdef Q_OS_LINUX
@@ -2902,7 +3070,7 @@ void RuntimeApp::trimMemory()
 
 void RuntimeApp::trimMemoryNow()
 {
-    if (m_windowInteractionActive)
+    if (m_windowInteractionActive || m_visualTransitionActive)
         return;
     if (m_cardGlowProvider)
         m_cardGlowProvider->clearCache();
@@ -2918,7 +3086,7 @@ void RuntimeApp::trimMemoryAfterPageSettled()
     scheduleAggressiveTrimAfterPageSettled();
     QTimer::singleShot(900, this, [this]() {
         trimMemoryNow();
-        if (!autoMemoryTrimEnabled() || m_windowInteractionActive)
+        if (!autoMemoryTrimEnabled() || m_windowInteractionActive || m_visualTransitionActive)
             return;
         const QVariantMap sample = memorySample(true);
         const double wsPrivate = sample.value(QStringLiteral("ws_private")).toDouble();
@@ -2955,12 +3123,12 @@ void RuntimeApp::scheduleAggressiveTrimAfterPageSettled()
     if (!autoMemoryTrimEnabled())
         return;
     const quint64 serial = ++m_aggressiveTrimSerial;
-    if (m_windowInteractionActive || m_aggressiveTrimScheduled)
+    if (m_windowInteractionActive || m_visualTransitionActive || m_aggressiveTrimScheduled)
         return;
     m_aggressiveTrimScheduled = true;
     QTimer::singleShot(1200, this, [this, serial]() {
         m_aggressiveTrimScheduled = false;
-        if (serial != m_aggressiveTrimSerial || !autoMemoryTrimEnabled() || m_windowInteractionActive)
+        if (serial != m_aggressiveTrimSerial || !autoMemoryTrimEnabled() || m_windowInteractionActive || m_visualTransitionActive)
             return;
         if (m_cardGlowProvider)
             m_cardGlowProvider->clearCache();
@@ -2974,7 +3142,7 @@ void RuntimeApp::scheduleAggressiveTrimAfterPageSettled()
 
 void RuntimeApp::emptyWorkingSetIfIdle()
 {
-    if (m_windowInteractionActive)
+    if (m_windowInteractionActive || m_visualTransitionActive)
         return;
 #ifdef Q_OS_WIN
     EmptyWorkingSet(GetCurrentProcess());

@@ -118,7 +118,25 @@ def _qt_prefix() -> Path:
 def _build_if_needed() -> int:
     exe = _exe_path()
     if exe.exists():
-        return 0
+        exe_mtime = exe.stat().st_mtime
+        source_roots = [
+            ROOT / "app" / "cpp" / "ui_runtime",
+            ROOT / "qml",
+            ROOT / "resources",
+        ]
+        stale = False
+        for source_root in source_roots:
+            if not source_root.exists():
+                continue
+            for path in source_root.rglob("*"):
+                if path.is_file() and path.stat().st_mtime > exe_mtime:
+                    stale = True
+                    break
+            if stale:
+                break
+        if not stale:
+            return 0
+        print("C++ UI sources changed; rebuilding runtime...", file=sys.stderr)
     build_script = _build_script()
     if not build_script.exists():
         print(f"C++ UI build script not found: {build_script}", file=sys.stderr)

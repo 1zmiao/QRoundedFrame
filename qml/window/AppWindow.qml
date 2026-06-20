@@ -437,6 +437,7 @@ Window {
         if (typeof App !== "undefined" && App && App.logRuntime)
             App.logRuntime("AppWindow.requestMainClose falling back to exit")
         root._closingMainWindow = true
+        root.visible = false
         if (typeof App !== "undefined" && App && App.exitApplication)
             App.exitApplication()
         else
@@ -776,6 +777,8 @@ Window {
         root.markNativeShadowDisplayReady()
     }
     onCornerRadiusChanged: {
+        if (root._closingMainWindow)
+            return
         nativeAgent.setCornerRadius(root.cornerRadius)
         linuxCsdController.handleCornerRadiusChanged()
         root.syncExternalShadow()

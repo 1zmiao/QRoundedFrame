@@ -277,6 +277,7 @@ Item {
         if (typeof App !== "undefined" && App && App.tray && App.tray.handleClosing(NativeHost))
             return
         root._closingMainWindow = true
+        NativeHost.visible = false
         if (typeof App !== "undefined" && App && App.exitApplication)
             App.exitApplication()
         else if (typeof NativeHost !== "undefined" && NativeHost)

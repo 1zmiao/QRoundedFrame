@@ -278,6 +278,7 @@ Item {
             return
         root._closingMainWindow = true
         NativeHost.visible = false
+        root.cleanupExternalShadow()
         if (typeof App !== "undefined" && App && App.exitApplication)
             App.exitApplication()
         else if (typeof NativeHost !== "undefined" && NativeHost)

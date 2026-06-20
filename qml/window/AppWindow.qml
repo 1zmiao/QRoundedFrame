@@ -438,6 +438,7 @@ Window {
             App.logRuntime("AppWindow.requestMainClose falling back to exit")
         root._closingMainWindow = true
         root.visible = false
+        root.cleanupExternalShadow()
         if (typeof App !== "undefined" && App && App.exitApplication)
             App.exitApplication()
         else
